@@ -1,0 +1,25 @@
+{
+  "name": "spacetraders-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Aggressive multi-ship scaling bot for SpaceTraders",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "tsx src/main.ts",
+    "orchestrator": "tsx src/orchestrator.ts",
+    "supervisor": "tsx src/supervisor.ts",
+    "status": "tsx src/scripts/status.ts",
+    "smoke": "tsx src/scripts/smoke.ts",
+    "test": "tsx --test src/**/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
