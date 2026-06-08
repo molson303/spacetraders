@@ -19,14 +19,19 @@
  *   REINVEST         "1" to auto-buy ships from surplus (default 1)
  *   RESERVE          credits to keep on hand, never spent on ships (default 75000)
  *   MAX_SHIPS        fleet size cap for reinvestment (default 8)
- *   REINVEST_SHIP    ship type to buy (default SHIP_LIGHT_SHUTTLE)
  *   REINVEST_YARD    shipyard waypoint to buy at (default X1-A20-A2)
- *   SHIP_COST_EST    price estimate gating a purchase attempt (default 90000)
+ *   SHIP_COST_EST    min surplus (credits-reserve) before bothering to scan the
+ *                    yard for a buy (default 90000)
+ *   MIN_ROI          skip buys whose ROI (earn weight / price) is below this
+ *                    (default 0 = buy any affordable cargo ship)
  */
 import { SpaceTradersApi } from './client/api.js';
 import { closeDb } from './state/db.js';
 import { runFleetRound } from './orchestrator.js';
 import { purchaseShipAt } from './behaviors/fleet.js';
+import { scanShipyard, systemOf } from './state/world.js';
+import { travelTo } from './util/nav.js';
+import { bestReinvestShip, earnWeight } from './util/reinvest.js';
 import { sleep } from './client/rateLimiter.js';
 import { log } from './util/logger.js';
 import type { ShipType } from './types/index.js';
@@ -42,9 +47,9 @@ const CFG = {
   reinvest: (process.env.REINVEST ?? '1') === '1',
   reserve: Number(process.env.RESERVE ?? 75000),
   maxShips: Number(process.env.MAX_SHIPS ?? 8),
-  reinvestShip: (process.env.REINVEST_SHIP ?? 'SHIP_LIGHT_SHUTTLE') as ShipType,
   reinvestYard: process.env.REINVEST_YARD ?? 'X1-A20-A2',
   shipCostEst: Number(process.env.SHIP_COST_EST ?? 90000),
+  minRoi: Number(process.env.MIN_ROI ?? 0),
 };
 
 let stopping = false;
@@ -61,27 +66,57 @@ process.on('SIGTERM', () => requestStop('SIGTERM'));
 
 /**
  * If reinvestment is enabled and we have surplus credits and fleet headroom,
- * route a free-moving scout to the shipyard and buy one ship. Runs between
- * rounds when ships are idle. Returns true if a ship was purchased.
+ * route a free-moving scout to the shipyard, read live prices, and buy as many
+ * ships as the surplus allows — each time picking the best ROI (earning weight
+ * per credit) ship that's affordable. Runs between rounds. Returns the number
+ * of ships purchased.
  */
-async function maybeReinvest(api: SpaceTradersApi): Promise<boolean> {
-  if (!CFG.reinvest) return false;
-  const agent = await api.getMyAgent();
-  const ships = (await api.listShips()).data;
-  if (ships.length >= CFG.maxShips) return false;
-  if (agent.credits - CFG.reserve < CFG.shipCostEst) return false;
+async function maybeReinvest(api: SpaceTradersApi): Promise<number> {
+  if (!CFG.reinvest) return 0;
+  let agent = await api.getMyAgent();
+  let fleet = (await api.listShips()).data;
+  if (fleet.length >= CFG.maxShips) return 0;
+  // Cheap pre-check: don't route a scout if we can't plausibly afford a ship.
+  if (agent.credits - CFG.reserve < CFG.shipCostEst) return 0;
 
-  // Prefer a fuel-free scout as the buying courier; fall back to any ship.
-  const scout = ships.find((s) => s.fuel.capacity === 0) ?? ships[0];
-  log.info(
-    `reinvest: credits=${agent.credits} buying ${CFG.reinvestShip} at ${CFG.reinvestYard} ` +
-      `(fleet ${ships.length}/${CFG.maxShips})`,
-  );
-  const res = await purchaseShipAt(api, CFG.reinvestShip, CFG.reinvestYard, {
-    scout,
-    maxPrice: CFG.reserve + CFG.shipCostEst,
-  });
-  return Boolean(res.ship);
+  // Route a fuel-free scout (or any ship) to the yard so live prices populate.
+  const scout = fleet.find((s) => s.fuel.capacity === 0) ?? fleet[0]!;
+  const system = systemOf(CFG.reinvestYard);
+  if (scout.nav.waypointSymbol !== CFG.reinvestYard) {
+    await travelTo(api, scout, CFG.reinvestYard);
+  }
+
+  let bought = 0;
+  while (fleet.length + bought < CFG.maxShips) {
+    const budget = agent.credits - CFG.reserve;
+    if (budget <= 0) break;
+
+    const yard = await scanShipyard(api, system, CFG.reinvestYard);
+    const candidates = (yard.ships ?? []).map((s) => ({ type: s.type, price: s.purchasePrice }));
+    const pick = bestReinvestShip(candidates, {
+      budget,
+      earnRate: earnWeight,
+      minRoi: CFG.minRoi,
+    });
+    if (!pick) {
+      log.info(`reinvest: nothing affordable/worthwhile (budget=${budget}); stopping`);
+      break;
+    }
+
+    log.info(
+      `reinvest: credits=${agent.credits} buying ${pick.type} @ ${pick.price} at ${CFG.reinvestYard} ` +
+        `(fleet ${fleet.length + bought}/${CFG.maxShips}, roi=${(earnWeight(pick.type) / pick.price).toFixed(5)})`,
+    );
+    const res = await purchaseShipAt(api, pick.type as ShipType, CFG.reinvestYard, {
+      maxPrice: pick.price + CFG.reserve,
+    });
+    if (!res.ship) break;
+    bought++;
+    agent = { ...agent, credits: res.credits };
+  }
+
+  if (bought > 0) log.info(`reinvest: bought ${bought} ship(s) this cycle`);
+  return bought;
 }
 
 async function main(): Promise<void> {
