@@ -30,7 +30,12 @@ export class SpaceTradersApi {
   readonly limiter: RateLimiter;
 
   constructor(limiter?: RateLimiter) {
-    this.limiter = limiter ?? new RateLimiter({ ratePerSecond: 2, burst: 2 });
+    this.limiter =
+      limiter ??
+      new RateLimiter({
+        ratePerSecond: Number(process.env.RL_PER_SECOND ?? 2),
+        burst: Number(process.env.RL_BURST ?? 25),
+      });
     this.http = new HttpClient(this.limiter);
   }
 

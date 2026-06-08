@@ -93,6 +93,9 @@ export class HttpClient {
 
       if (res.status === 204) return undefined as T;
 
+      // Let the limiter re-tune to the server's advertised limits.
+      this.limiter.observeHeaders(res.headers);
+
       const text = await res.text();
       const json = text ? safeJson(text) : undefined;
 
