@@ -132,17 +132,36 @@ export async function runFleetRound(
   // that fires as soon as the earners complete.
   let earnersDone = false;
 
+  const contractorJob = (async () => {
+    try {
+      const n = await runContractPipeline(api, contractor, system, {
+        maxContracts,
+        hq: agent.headquarters,
+      });
+      result.contractsCompleted += n;
+      log.info(`${contractor.symbol} contractor done: ${n} contract(s)`);
+      // No feasible contract this round -> don't let the largest hauler idle.
+      // Re-fetch its live nav/cargo (the pipeline may have moved it) and run it
+      // as a trader, avoiding every good the dedicated traders already claimed.
+      if (n === 0) {
+        const fresh = await api.getShip(contractor.symbol);
+        const r = await runTrader(api, fresh, system, {
+          cycles: tradeCycles,
+          minProfit,
+          avoidGoods: assignedGoods,
+        });
+        result.traderProfit += r.profit;
+        log.info(
+          `${contractor.symbol} idle-contractor traded: ${r.cycles} cycle(s) profit=${r.profit}`,
+        );
+      }
+    } catch (e) {
+      log.error(`${contractor.symbol} contractor errored: ${e}`);
+    }
+  })();
+
   const earnerJobs: Promise<unknown>[] = [
-    runContractPipeline(api, contractor, system, {
-      maxContracts,
-      hq: agent.headquarters,
-    }).then(
-      (n) => {
-        result.contractsCompleted += n;
-        log.info(`${contractor.symbol} contractor done: ${n} contract(s)`);
-      },
-      (e) => log.error(`${contractor.symbol} contractor errored: ${e}`),
-    ),
+    contractorJob,
     ...traders.map((ship, i) =>
       runTrader(api, ship, system, {
         cycles: tradeCycles,

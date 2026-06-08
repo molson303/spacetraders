@@ -1,10 +1,11 @@
 import type { SpaceTradersApi } from '../client/api.js';
-import { findExporters, getWaypointRow } from '../state/repos.js';
+import { findExporters, getLatestPrice, getWaypointRow } from '../state/repos.js';
 import { distance, travelTo } from '../util/nav.js';
 import { createLogger } from '../util/logger.js';
 import {
   acceptIfNeeded,
   deliverFromShip,
+  evaluateContract,
   procurementGood,
   remainingNeed,
 } from './contract.js';
@@ -27,6 +28,27 @@ export function nearestExporter(
     .map((sym) => ({ sym, wp: getWaypointRow(sym) }))
     .filter((e) => e.wp)
     .sort((a, b) => distance(origin, a.wp!) - distance(origin, b.wp!))[0]?.sym;
+}
+
+/**
+ * Feasibility check for a contract from this ship's vantage point: is there an
+ * in-system exporter and does the per-unit payout beat the cheapest known buy
+ * price? Wraps the pure {@link evaluateContract} with live DB lookups.
+ */
+function isContractFeasible(contract: Contract, system: string, from: string): boolean {
+  const hasExporter = (good: string): boolean => findExporters(system, good).length > 0;
+  const buyPriceOf = (good: string): number | undefined => {
+    const yard = nearestExporter(system, good, from);
+    if (!yard) return undefined;
+    return getLatestPrice(yard, good)?.purchase_price ?? undefined;
+  };
+  const evaluation = evaluateContract(contract, hasExporter, buyPriceOf);
+  if (!evaluation.feasible) {
+    log.info(
+      `contract ${contract.id} ${procurementGood(contract) ?? '?'} infeasible: ${evaluation.reason}`,
+    );
+  }
+  return evaluation.feasible;
 }
 
 export interface PipelineOptions {
@@ -131,10 +153,13 @@ async function claimOrNegotiate(
   hq?: string,
 ): Promise<Contract | undefined> {
   const now = Date.now();
+  const system = ship.nav.systemSymbol;
+  const from = ship.nav.waypointSymbol;
   const existing = (await api.listContracts()).data
     .filter((c) => !c.fulfilled && !claimed.has(c.id))
     .filter((c) => new Date(c.terms.deadline).getTime() > now)
     .filter((c) => procurementGood(c))
+    .filter((c) => isContractFeasible(c, system, from))
     .sort(
       (a, b) =>
         b.terms.payment.onAccepted +
@@ -149,10 +174,16 @@ async function claimOrNegotiate(
     return c;
   }
 
-  // Negotiate a new one — ship must be docked, ideally at a marketplace/HQ.
+  // Negotiate a new one — ship must be docked, ideally at a marketplace/HQ. A
+  // freshly negotiated contract that isn't feasible is left UNACCEPTED so we
+  // don't burn the accept on a good no in-system market exports.
   try {
     await api.dockShip(ship.symbol).catch(() => undefined);
     const { contract } = await api.negotiateContract(ship.symbol);
+    if (!isContractFeasible(contract, system, contract.terms.deliver?.[0]?.destinationSymbol ?? from)) {
+      log.warn(`${ship.symbol} negotiated infeasible contract ${contract.id}; not accepting`);
+      return undefined;
+    }
     claimed.add(contract.id);
     log.info(`${ship.symbol} negotiated new contract ${contract.id}`);
     return contract;
@@ -163,6 +194,10 @@ async function claimOrNegotiate(
       await api.dockShip(ship.symbol).catch(() => undefined);
       try {
         const { contract } = await api.negotiateContract(ship.symbol);
+        if (!isContractFeasible(contract, system, contract.terms.deliver?.[0]?.destinationSymbol ?? hq)) {
+          log.warn(`${ship.symbol} negotiated infeasible contract ${contract.id} at HQ; not accepting`);
+          return undefined;
+        }
         claimed.add(contract.id);
         log.info(`${ship.symbol} negotiated new contract ${contract.id} at HQ`);
         return contract;

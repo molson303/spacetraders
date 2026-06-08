@@ -111,3 +111,54 @@ export function remainingNeed(contract: Contract, tradeSymbol: string): number {
 export function procurementGood(contract: Contract): string | undefined {
   return contract.terms.deliver?.[0]?.tradeSymbol;
 }
+
+export interface ContractEval {
+  good: string | undefined;
+  totalUnits: number;
+  payout: number;
+  payoutPerUnit: number;
+  estCostPerUnit: number | undefined;
+  feasible: boolean;
+  reason?: string;
+}
+
+/**
+ * Decide whether a procurement contract is worth working, using injected
+ * lookups so this stays pure and unit-testable. A contract is feasible only if
+ * it is procurement, not expired, has a known in-system exporter for the good,
+ * and (when a buy price is known) the per-unit payout clears the price the
+ * pipeline would actually pay (buy cap is ~90% of payout/unit). This avoids the
+ * wasted accept/abandon cycles seen with goods no market in-system exports.
+ */
+export function evaluateContract(
+  contract: Contract,
+  hasExporter: (good: string) => boolean,
+  buyPriceOf: (good: string) => number | undefined,
+  now: number = Date.now(),
+): ContractEval {
+  const good = procurementGood(contract);
+  const totalUnits = (contract.terms.deliver ?? []).reduce((s, d) => s + d.unitsRequired, 0);
+  const payout = contract.terms.payment.onAccepted + contract.terms.payment.onFulfilled;
+  const payoutPerUnit = payout / Math.max(1, totalUnits);
+  const base: ContractEval = {
+    good,
+    totalUnits,
+    payout,
+    payoutPerUnit,
+    estCostPerUnit: undefined,
+    feasible: false,
+  };
+
+  if (!good) return { ...base, reason: 'not-procurement' };
+  if (new Date(contract.terms.deadline).getTime() <= now) return { ...base, reason: 'expired' };
+  if (!hasExporter(good)) return { ...base, reason: 'no-exporter' };
+
+  const estCostPerUnit = buyPriceOf(good);
+  // The pipeline caps its buy at ~90% of payout/unit; if the known price already
+  // exceeds that, the buy would never fire -> treat as infeasible up front.
+  if (estCostPerUnit != null && estCostPerUnit >= payoutPerUnit * 0.9) {
+    return { ...base, estCostPerUnit, reason: 'negative-roi' };
+  }
+  return { ...base, estCostPerUnit, feasible: true };
+}
+
