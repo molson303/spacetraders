@@ -11,6 +11,9 @@
  *   TRADE_CYCLES     arbitrage cycles each trader runs per round (default 3)
  *   MIN_PROFIT       minimum per-unit spread a trader will act on (default 20)
  *   SCAN_LIMIT       markets each scanner visits per round (default 20)
+ *   SCAN_BUDGET_MS   max ms a scanner runs per round so it never gates the
+ *                    round; earners (contractor/traders) define round end
+ *                    and reinvest fires right after (default 180000 = 3 min)
  *   REST_MS          pause between rounds (default 5000)
  *   MAX_ROUNDS       stop after N rounds (default 0 = unlimited)
  *   REINVEST         "1" to auto-buy ships from surplus (default 1)
@@ -33,6 +36,7 @@ const CFG = {
   tradeCycles: Number(process.env.TRADE_CYCLES ?? 3),
   minProfit: Number(process.env.MIN_PROFIT ?? 20),
   scanLimit: Number(process.env.SCAN_LIMIT ?? 20),
+  scanBudgetMs: Number(process.env.SCAN_BUDGET_MS ?? 180000),
   restMs: Number(process.env.REST_MS ?? 5000),
   maxRounds: Number(process.env.MAX_ROUNDS ?? 0),
   reinvest: (process.env.REINVEST ?? '1') === '1',
@@ -101,6 +105,7 @@ async function main(): Promise<void> {
         tradeCycles: CFG.tradeCycles,
         minProfit: CFG.minProfit,
         scanLimit: CFG.scanLimit,
+        scanBudgetMs: CFG.scanBudgetMs,
       });
       const dt = Math.round((Date.now() - t0) / 1000);
       log.info(

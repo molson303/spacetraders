@@ -35,6 +35,8 @@ export interface FleetRoundOptions {
   tradeCycles?: number;
   minProfit?: number;
   scanLimit?: number;
+  /** Time budget for scanners so they never become the round's long pole. */
+  scanBudgetMs?: number;
 }
 
 export interface FleetRoundResult {
@@ -66,6 +68,7 @@ export async function runFleetRound(
   const tradeCycles = opts.tradeCycles ?? 5;
   const minProfit = opts.minProfit ?? 20;
   const scanLimit = opts.scanLimit ?? 30;
+  const scanBudgetMs = opts.scanBudgetMs ?? 180000;
 
   const agent = await api.getMyAgent();
   const system = systemOf(agent.headquarters);
@@ -106,7 +109,13 @@ export async function runFleetRound(
       `scanners=[${scouts.map((s) => s.symbol).join(', ')}]`,
   );
 
-  const jobs: Promise<unknown>[] = [
+  // Earner jobs (contractor + traders) define when the round is "done": the
+  // moment they finish we settle credits and reinvest. Scanners run alongside
+  // but must never gate the round, so they get a time budget and a stop signal
+  // that fires as soon as the earners complete.
+  let earnersDone = false;
+
+  const earnerJobs: Promise<unknown>[] = [
     runContractPipeline(api, contractor, system, {
       maxContracts,
       hq: agent.headquarters,
@@ -126,20 +135,30 @@ export async function runFleetRound(
         (e) => log.error(`${ship.symbol} trader errored: ${e}`),
       ),
     ),
-    ...scouts.map((ship) =>
-      runScanner(api, ship, system, { limit: scanLimit }).then(
-        (n) => {
-          result.scannedMarkets += n;
-          log.info(`${ship.symbol} scanner done: ${n} market(s)`);
-        },
-        (e) => log.error(`${ship.symbol} scanner errored: ${e}`),
-      ),
-    ),
   ];
 
-  await Promise.allSettled(jobs);
+  const scannerJobs: Promise<unknown>[] = scouts.map((ship) =>
+    runScanner(api, ship, system, {
+      limit: scanLimit,
+      budgetMs: scanBudgetMs,
+      shouldStop: () => earnersDone,
+    }).then(
+      (n) => {
+        result.scannedMarkets += n;
+        log.info(`${ship.symbol} scanner done: ${n} market(s)`);
+      },
+      (e) => log.error(`${ship.symbol} scanner errored: ${e}`),
+    ),
+  );
 
+  // Wait for the earners; that defines the round's outcome and credit delta.
+  await Promise.allSettled(earnerJobs);
+  earnersDone = true; // signal scanners to wind down at their next checkpoint
   result.endCredits = (await api.getMyAgent()).credits;
+
+  // Let any scanner stop cleanly before returning so the next round doesn't
+  // spawn a second scanner on the same probe. Bounded by the current hop.
+  await Promise.allSettled(scannerJobs);
   return result;
 }
 
