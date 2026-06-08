@@ -1,6 +1,6 @@
 import type { SpaceTradersApi } from '../client/api.js';
 import {
-  findBestArbitrage,
+  findArbitrageRoutes,
   findUnpricedMarkets,
   getLatestPricesForGood,
   getWaypointRow,
@@ -21,7 +21,36 @@ export interface TraderOptions {
   cycles?: number;
   /** Minimum per-unit spread to bother trading. Covers fuel + slippage. */
   minProfit?: number;
+  /**
+   * Good this trader was assigned by the orchestrator. The trader sticks to it
+   * while it stays profitable so concurrent traders don't drain the same market.
+   */
+  assignedGood?: string;
+  /** Goods claimed by sibling traders, avoided when falling back off-assignment. */
+  avoidGoods?: string[];
 }
+
+/**
+ * Choose this cycle's route from fresh prices. Prefers the trader's assigned
+ * good while it still clears `minProfit`; otherwise falls back to the best route
+ * whose good isn't claimed by a sibling trader (and only collides as a last
+ * resort when every remaining route is already spoken for).
+ */
+function selectRoute(
+  system: string,
+  minProfit: number,
+  assignedGood: string | undefined,
+  avoidGoods: Set<string>,
+): ArbitrageRoute | undefined {
+  const routes = findArbitrageRoutes(system, minProfit, 30);
+  if (routes.length === 0) return undefined;
+  if (assignedGood) {
+    const mine = routes.find((r) => r.good === assignedGood);
+    if (mine) return mine;
+  }
+  return routes.find((r) => !avoidGoods.has(r.good)) ?? routes[0];
+}
+
 
 /** Scan the market at the ship's current waypoint, capturing live prices. */
 async function scanHere(api: SpaceTradersApi, ship: Ship): Promise<void> {
@@ -139,13 +168,18 @@ export async function runTrader(
 ): Promise<{ cycles: number; profit: number }> {
   const maxCycles = opts.cycles ?? 5;
   const minProfit = opts.minProfit ?? 20;
+  const assignedGood = opts.assignedGood;
+  const avoidGoods = new Set(opts.avoidGoods ?? []);
   let cycles = 0;
   let totalProfit = 0;
 
+  if (assignedGood) {
+    log.info(`${ship.symbol} assigned good ${assignedGood}`);
+  }
   await scanHere(api, ship);
 
   while (cycles < maxCycles) {
-    const route = findBestArbitrage(system, minProfit);
+    const route = selectRoute(system, minProfit, assignedGood, avoidGoods);
     if (!route) {
       const explored = await explore(api, ship, system);
       if (!explored) {

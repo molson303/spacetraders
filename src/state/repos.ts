@@ -425,6 +425,33 @@ export function findBestArbitrage(system: string, minProfit = 1): ArbitrageRoute
   return r;
 }
 
+/**
+ * Top buy-low / sell-high routes in a system, ranked by per-unit spread. Unlike
+ * {@link findBestArbitrage} this returns up to `limit` candidates (a good/route
+ * may appear more than once via different waypoint pairs) so callers can hand
+ * distinct, non-overlapping routes to concurrent traders.
+ */
+export function findArbitrageRoutes(
+  system: string,
+  minProfit = 1,
+  limit = 20,
+): ArbitrageRoute[] {
+  return getDb()
+    .prepare(
+      `SELECT b.trade_symbol AS good, b.waypoint AS buyAt, b.purchase_price AS buyPrice,
+              s.waypoint AS sellAt, s.sell_price AS sellPrice,
+              (s.sell_price - b.purchase_price) AS profitPerUnit, b.trade_volume AS tradeVolume
+       FROM market_latest b
+       JOIN market_latest s
+         ON s.trade_symbol = b.trade_symbol AND s.system = b.system AND s.waypoint <> b.waypoint
+       WHERE b.system = ? AND b.purchase_price > 0 AND s.sell_price > 0
+         AND (s.sell_price - b.purchase_price) >= ?
+       ORDER BY profitPerUnit DESC
+       LIMIT ?`,
+    )
+    .all(system, minProfit, limit) as unknown as ArbitrageRoute[];
+}
+
 /** Marketplace waypoints in a system that have NO captured prices yet. */
 export function findUnpricedMarkets(system: string): WaypointRow[] {
   const db = getDb();

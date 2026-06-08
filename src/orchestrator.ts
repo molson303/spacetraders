@@ -27,6 +27,8 @@ import {
 import { runContractPipeline } from './behaviors/contractPipeline.js';
 import { runTrader } from './behaviors/trader.js';
 import { runScanner } from './behaviors/scanner.js';
+import { findArbitrageRoutes } from './state/repos.js';
+import { assignRoutes } from './util/routes.js';
 import { log } from './util/logger.js';
 import type { Ship } from './types/index.js';
 
@@ -109,6 +111,21 @@ export async function runFleetRound(
       `scanners=[${scouts.map((s) => s.symbol).join(', ')}]`,
   );
 
+  // Assign each trader a distinct, non-overlapping route up front so concurrent
+  // traders don't pile onto the same good and collapse its spread. Traders stick
+  // to their assigned good while it stays profitable, then fall back to any
+  // unclaimed route. Ranking is by profit-per-trip (spread x movable volume).
+  const candidates = findArbitrageRoutes(system, minProfit, 30);
+  const assignments = assignRoutes(candidates, traders.length);
+  const assignedGoods = assignments.map((r) => r.good);
+  if (assignedGoods.length > 0) {
+    log.info(
+      `route assignments: ${assignments
+        .map((r, i) => `${traders[i]!.symbol}->${r.good}(${r.buyAt}->${r.sellAt} ~${r.profitPerUnit}/u)`)
+        .join(', ')}`,
+    );
+  }
+
   // Earner jobs (contractor + traders) define when the round is "done": the
   // moment they finish we settle credits and reinvest. Scanners run alongside
   // but must never gate the round, so they get a time budget and a stop signal
@@ -126,8 +143,13 @@ export async function runFleetRound(
       },
       (e) => log.error(`${contractor.symbol} contractor errored: ${e}`),
     ),
-    ...traders.map((ship) =>
-      runTrader(api, ship, system, { cycles: tradeCycles, minProfit }).then(
+    ...traders.map((ship, i) =>
+      runTrader(api, ship, system, {
+        cycles: tradeCycles,
+        minProfit,
+        assignedGood: assignedGoods[i],
+        avoidGoods: assignedGoods.filter((_, j) => j !== i),
+      }).then(
         (r) => {
           result.traderProfit += r.profit;
           log.info(`${ship.symbol} trader done: ${r.cycles} cycle(s) profit=${r.profit}`);
