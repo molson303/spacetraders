@@ -27,8 +27,9 @@ import {
 import { runContractPipeline } from './behaviors/contractPipeline.js';
 import { runTrader } from './behaviors/trader.js';
 import { runScanner } from './behaviors/scanner.js';
-import { findArbitrageRoutes } from './state/repos.js';
-import { assignRoutes } from './util/routes.js';
+import { findArbitrageRoutes, getWaypointRow } from './state/repos.js';
+import { assignRoutes, routeCreditsPerSecond } from './util/routes.js';
+import { distance } from './util/nav.js';
 import { log } from './util/logger.js';
 import type { Ship } from './types/index.js';
 
@@ -114,9 +115,20 @@ export async function runFleetRound(
   // Assign each trader a distinct, non-overlapping route up front so concurrent
   // traders don't pile onto the same good and collapse its spread. Traders stick
   // to their assigned good while it stays profitable, then fall back to any
-  // unclaimed route. Ranking is by profit-per-trip (spread x movable volume).
+  // unclaimed route. Ranking is by credits-per-second (profit-per-trip divided
+  // by round-trip travel time) so short, fat-volume hops that turn the hold over
+  // quickly are preferred over long, thin high-margin hauls.
   const candidates = findArbitrageRoutes(system, minProfit, 30);
-  const assignments = assignRoutes(candidates, traders.length);
+  const holdSize = Math.max(...haulers.map((s) => s.cargo.capacity), 40);
+  const distanceOf = (from: string, to: string): number => {
+    const a = getWaypointRow(from);
+    const b = getWaypointRow(to);
+    return a && b ? distance(a, b) : 0;
+  };
+  const assignments = assignRoutes(candidates, traders.length, {
+    holdSize,
+    score: (r) => routeCreditsPerSecond(r, distanceOf, { holdSize }),
+  });
   const assignedGoods = assignments.map((r) => r.good);
   if (assignedGoods.length > 0) {
     log.info(

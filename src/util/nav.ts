@@ -9,6 +9,7 @@ import {
 } from '../state/repos.js';
 import type { Ship } from '../types/index.js';
 import { createLogger } from './logger.js';
+import { selectFlightMode } from './routes.js';
 
 const log = createLogger('nav');
 
@@ -116,8 +117,19 @@ export async function navigateTo(
     ship = await tryRefuel(api, ship);
   }
 
-  if (opts.flightMode && ship.nav.flightMode !== opts.flightMode) {
-    const { nav } = await api.patchNav(ship.symbol, opts.flightMode);
+  // Pick the fastest flight mode the available fuel can sustain for this leg.
+  // For fuel-burning ships an explicit mode (e.g. forced DRIFT) always wins;
+  // otherwise auto-select BURN/CRUISE/DRIFT from the post-refuel fuel level.
+  // No-fuel ships (probes) are left on their default mode.
+  let mode = opts.flightMode;
+  if (!mode && ship.fuel.capacity > 0) {
+    const here = getWaypointRow(ship.nav.waypointSymbol);
+    const there = getWaypointRow(destination);
+    const legDistance = here && there ? distance(here, there) : 0;
+    mode = selectFlightMode(legDistance, ship.fuel.current);
+  }
+  if (mode && ship.nav.flightMode !== mode) {
+    const { nav } = await api.patchNav(ship.symbol, mode);
     ship.nav = nav;
   }
 
