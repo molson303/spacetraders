@@ -194,6 +194,23 @@ export class SpaceTradersApi {
     ).data;
   }
 
+  // ---------- Fleet: maintenance / repair ----------
+  /** Preview the repair cost (ship must be docked at a shipyard). */
+  async getRepairCost(symbol: string): Promise<{ transaction: RepairTxn }> {
+    return (
+      await this.http.get<ApiItem<{ transaction: RepairTxn }>>(`/my/ships/${symbol}/repair`)
+    ).data;
+  }
+
+  /** Repair a ship to full condition (ship must be docked at a shipyard). */
+  async repairShip(symbol: string): Promise<{ agent: Agent; ship: Ship; transaction: RepairTxn }> {
+    return (
+      await this.http.post<ApiItem<{ agent: Agent; ship: Ship; transaction: RepairTxn }>>(
+        `/my/ships/${symbol}/repair`,
+      )
+    ).data;
+  }
+
   // ---------- Fleet: resource extraction ----------
   async createSurvey(symbol: string): Promise<{ surveys: Survey[]; cooldown: ShipCooldown }> {
     return (
@@ -287,6 +304,12 @@ export interface MarketTxn {
   type: 'PURCHASE' | 'SELL';
   units: number;
   pricePerUnit: number;
+  totalPrice: number;
+  timestamp: string;
+}
+
+export interface RepairTxn {
+  shipSymbol: string;
   totalPrice: number;
   timestamp: string;
 }

@@ -24,11 +24,15 @@
  *                    yard for a buy (default 90000)
  *   MIN_ROI          skip buys whose ROI (earn weight / price) is below this
  *                    (default 0 = buy any affordable cargo ship)
+ *   REPAIR           "1" to auto-repair worn ships between rounds (default 1)
+ *   REPAIR_THRESHOLD condition at/below which a ship is repaired (default 0.4)
+ *   REPAIR_YARD      shipyard to repair at (default REINVEST_YARD)
  */
 import { SpaceTradersApi } from './client/api.js';
 import { closeDb } from './state/db.js';
 import { runFleetRound } from './orchestrator.js';
 import { purchaseShipAt } from './behaviors/fleet.js';
+import { maybeRepair } from './behaviors/maintenance.js';
 import { scanShipyard, systemOf } from './state/world.js';
 import { travelTo } from './util/nav.js';
 import { bestReinvestShip, earnWeight } from './util/reinvest.js';
@@ -50,6 +54,9 @@ const CFG = {
   reinvestYard: process.env.REINVEST_YARD ?? 'X1-A20-A2',
   shipCostEst: Number(process.env.SHIP_COST_EST ?? 90000),
   minRoi: Number(process.env.MIN_ROI ?? 0),
+  repair: (process.env.REPAIR ?? '1') === '1',
+  repairThreshold: Number(process.env.REPAIR_THRESHOLD ?? 0.4),
+  repairYard: process.env.REPAIR_YARD ?? process.env.REINVEST_YARD ?? 'X1-A20-A2',
 };
 
 let stopping = false;
@@ -119,6 +126,32 @@ async function maybeReinvest(api: SpaceTradersApi): Promise<number> {
   return bought;
 }
 
+/**
+ * Repair any worn ships between rounds. Each repair is capped at the spendable
+ * surplus (credits - reserve) so maintenance never eats into the reserve, and
+ * healthy ships are skipped cheaply by the condition check before any travel.
+ * Returns the number of ships repaired.
+ */
+async function maybeRepairFleet(api: SpaceTradersApi): Promise<number> {
+  if (!CFG.repair) return 0;
+  let repaired = 0;
+  const fleet = (await api.listShips()).data;
+  for (const ship of fleet) {
+    if (stopping) break;
+    const agent = await api.getMyAgent();
+    const before = ship.frame.condition;
+    const result = await maybeRepair(api, ship, {
+      shipyard: CFG.repairYard,
+      threshold: CFG.repairThreshold,
+      maxSpend: Math.max(0, agent.credits - CFG.reserve),
+    });
+    // Count it as repaired only when condition actually improved.
+    if (before !== undefined && (result.frame.condition ?? 0) > before) repaired++;
+  }
+  if (repaired > 0) log.info(`maintenance: repaired ${repaired} ship(s) this cycle`);
+  return repaired;
+}
+
 async function main(): Promise<void> {
   const api = new SpaceTradersApi();
   const startAgent = await api.getMyAgent();
@@ -163,6 +196,13 @@ async function main(): Promise<void> {
       await maybeReinvest(api);
     } catch (err) {
       log.warn(`reinvest skipped: ${(err as Error).message}`);
+    }
+
+    if (stopping) break;
+    try {
+      await maybeRepairFleet(api);
+    } catch (err) {
+      log.warn(`repair skipped: ${(err as Error).message}`);
     }
 
     if (stopping) break;

@@ -180,9 +180,9 @@ export interface Ship {
   registration: { name: string; factionSymbol: string; role: string };
   nav: ShipNav;
   crew: { current: number; capacity: number; required: number; morale: number };
-  frame: { symbol: string; name: string };
-  reactor: { symbol: string };
-  engine: { symbol: string; speed: number };
+  frame: { symbol: string; name: string; condition?: number; integrity?: number };
+  reactor: { symbol: string; condition?: number; integrity?: number };
+  engine: { symbol: string; speed: number; condition?: number; integrity?: number };
   cooldown: ShipCooldown;
   modules: { symbol: string }[];
   mounts: ShipMount[];
