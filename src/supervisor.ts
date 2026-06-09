@@ -43,7 +43,13 @@ import { runFleetRound } from './orchestrator.js';
 import { purchaseShipAt } from './behaviors/fleet.js';
 import { maybeRepair } from './behaviors/maintenance.js';
 import { scanShipyard, systemOf } from './state/world.js';
-import { findWaypointsByTrait, getWaypointRow } from './state/repos.js';
+import {
+  findJumpGatesBySystem,
+  findWaypointsByTrait,
+  getJumpGateRow,
+  getWaypointRow,
+  isWaypointUnderConstruction,
+} from './state/repos.js';
 import { kvGet, kvSet } from './state/kv.js';
 import { travelTo } from './util/nav.js';
 import { bestReinvestShip, earnWeight } from './util/reinvest.js';
@@ -104,6 +110,39 @@ function discoverShipyard(
 function coordsOf(symbol: string): { x: number; y: number } | undefined {
   const wp = getWaypointRow(symbol);
   return wp ? { x: wp.x, y: wp.y } : undefined;
+}
+
+/**
+ * Marketplaces eligible for a stationed probe. Home-system markets always
+ * qualify (priority 1, covered first). When the home jump gate is operational,
+ * already-hydrated markets in directly-connected neighbor systems are also
+ * included (priority 0) so cross-system price coverage fills in once MAX_PROBES
+ * allows. While the gate is under construction only home markets are returned,
+ * keeping cross-system stationing inert until jumps are possible.
+ */
+function gatherStationMarkets(system: string): StationMarket[] {
+  const home: StationMarket[] = findWaypointsByTrait(system, 'MARKETPLACE').map((w) => ({
+    symbol: w.symbol,
+    system: w.system,
+    priority: 1,
+  }));
+
+  const homeGate = findJumpGatesBySystem(system)[0];
+  const gateBlocked = homeGate ? isWaypointUnderConstruction(homeGate.symbol) : true;
+  if (!homeGate || gateBlocked) return home;
+
+  const neighborSystems = new Set(
+    (getJumpGateRow(homeGate.symbol)?.connections ?? [])
+      .map((c) => systemOf(c))
+      .filter((s) => s !== system),
+  );
+  const neighbors: StationMarket[] = [];
+  for (const sys of neighborSystems) {
+    for (const w of findWaypointsByTrait(sys, 'MARKETPLACE')) {
+      neighbors.push({ symbol: w.symbol, system: w.system, priority: 0 });
+    }
+  }
+  return [...home, ...neighbors];
 }
 
 let stopping = false;
@@ -208,10 +247,7 @@ async function maybeProvisionProbes(api: SpaceTradersApi): Promise<number> {
   const system = systemOf(agent.headquarters);
 
   const isProbe = (s: { fuel: { capacity: number } }): boolean => s.fuel.capacity === 0;
-  const markets: StationMarket[] = findWaypointsByTrait(system, 'MARKETPLACE').map((w) => ({
-    symbol: w.symbol,
-    system: w.system,
-  }));
+  const markets: StationMarket[] = gatherStationMarkets(system);
   if (markets.length === 0) return 0;
 
   const existing = kvGet<StationAssignment[]>('probe_stations') ?? [];
