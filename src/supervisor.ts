@@ -45,6 +45,7 @@ import { maybeRepair } from './behaviors/maintenance.js';
 import { scanShipyard, systemOf } from './state/world.js';
 import {
   findJumpGatesBySystem,
+  findShipyardsSellingShipType,
   findWaypointsByTrait,
   getJumpGateRow,
   getWaypointRow,
@@ -59,7 +60,7 @@ import {
   type StationAssignment,
   type StationMarket,
 } from './util/stations.js';
-import { selectShipyard, type ShipyardCandidate } from './util/shipyard.js';
+import { orderShipyardsForPurchase, selectShipyard, type ShipyardCandidate } from './util/shipyard.js';
 import { sleep } from './client/rateLimiter.js';
 import { log } from './util/logger.js';
 import type { ShipType } from './types/index.js';
@@ -268,30 +269,44 @@ async function maybeProvisionProbes(api: SpaceTradersApi): Promise<number> {
 
   let bought = 0;
   if (buyCount > 0) {
-    const ferry = probes[0] ?? fleet[0]!;
-    const yardSymbol = discoverShipyard(
-      system,
-      CFG.reinvestYard,
-      coordsOf(ferry.nav.waypointSymbol) ?? coordsOf(agent.headquarters),
+    let ferry = probes[0] ?? fleet[0]!;
+    // Prefer a yard already known to stock SHIP_PROBE over the merely-nearest
+    // one (the old bug ferried to the closest yard, which never sold probes,
+    // bought nothing, and dragged a probe off its station every round).
+    const candidates: ShipyardCandidate[] = findWaypointsByTrait(system, 'SHIPYARD').map((w) => ({
+      symbol: w.symbol,
+      x: w.x,
+      y: w.y,
+    }));
+    const sellers = new Set(
+      findShipyardsSellingShipType(system, 'SHIP_PROBE').map((s) => s.symbol),
     );
-    if (!yardSymbol) {
+    const ordered = orderShipyardsForPurchase(candidates, sellers, {
+      override: CFG.reinvestYard,
+      from: coordsOf(ferry.nav.waypointSymbol) ?? coordsOf(agent.headquarters),
+    });
+    if (ordered.length === 0) {
       log.info(`provision: no shipyard found in ${system}; skipping buy`);
     } else {
-      if (ferry.nav.waypointSymbol !== yardSymbol) await travelTo(api, ferry, yardSymbol);
-      for (let i = 0; i < buyCount; i++) {
-        const yard = await scanShipyard(api, system, yardSymbol);
-        const offer = (yard.ships ?? []).find((s) => s.type === 'SHIP_PROBE');
-        if (!offer) {
-          log.info('provision: no SHIP_PROBE sold at yard; skipping');
-          break;
+      for (const yardSymbol of ordered) {
+        if (bought >= buyCount) break;
+        if (ferry.nav.waypointSymbol !== yardSymbol) ferry = await travelTo(api, ferry, yardSymbol);
+        let soldHere = false;
+        while (bought < buyCount) {
+          const yard = await scanShipyard(api, system, yardSymbol);
+          const offer = (yard.ships ?? []).find((s) => s.type === 'SHIP_PROBE');
+          if (!offer) break;
+          soldHere = true; // this yard stocks probes; don't wander to others
+          if (agent.credits - CFG.reserve < offer.purchasePrice) break;
+          const res = await purchaseShipAt(api, 'SHIP_PROBE' as ShipType, yardSymbol, {
+            maxPrice: offer.purchasePrice + CFG.reserve,
+          });
+          if (!res.ship) break;
+          bought++;
+          agent = { ...agent, credits: res.credits };
         }
-        if (agent.credits - CFG.reserve < offer.purchasePrice) break;
-        const res = await purchaseShipAt(api, 'SHIP_PROBE' as ShipType, yardSymbol, {
-          maxPrice: offer.purchasePrice + CFG.reserve,
-        });
-        if (!res.ship) break;
-        bought++;
-        agent = { ...agent, credits: res.credits };
+        if (soldHere) break;
+        log.info(`provision: ${yardSymbol} does not sell SHIP_PROBE; trying next yard`);
       }
       if (bought > 0) log.info(`provision: bought ${bought} probe(s) this cycle`);
     }

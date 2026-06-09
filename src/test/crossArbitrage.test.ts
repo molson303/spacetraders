@@ -71,3 +71,18 @@ test('orders results by per-unit spread descending', () => {
     assert.ok(routes[i - 1]!.profitPerUnit >= routes[i]!.profitPerUnit);
   }
 });
+
+test('a deep low-margin route outranks a thin high-margin one (depth-aware)', () => {
+  // THIN: huge spread (100) but the sink only absorbs 2 units per step.
+  seedPrice({ waypoint: 'X1-A20-TB', system: 'X1-A20', good: 'THING', purchase: 10, sell: 8 });
+  seedPrice({ waypoint: 'X1-CN42-TS', system: 'X1-CN42', good: 'THING', sell: 110, volume: 2 });
+  // DEEP: modest spread (20) but absorbs a full hold's worth per step.
+  seedPrice({ waypoint: 'X1-A20-DB', system: 'X1-A20', good: 'DEEPG', purchase: 10, sell: 8 });
+  seedPrice({ waypoint: 'X1-CN42-DS', system: 'X1-CN42', good: 'DEEPG', sell: 30, volume: 40 });
+
+  const routes = findCrossSystemArbitrageRoutes(1);
+  const deepIdx = routes.findIndex((r) => r.good === 'DEEPG');
+  const thinIdx = routes.findIndex((r) => r.good === 'THING');
+  assert.ok(deepIdx >= 0 && thinIdx >= 0, 'both routes present');
+  assert.ok(deepIdx < thinIdx, 'deep low-margin route ranks above thin high-margin route');
+});

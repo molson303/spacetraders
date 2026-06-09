@@ -133,6 +133,30 @@ export function upsertShipyard(system: string, yard: Shipyard): void {
   );
 }
 
+export interface ShipyardSeller {
+  symbol: string;
+  x: number;
+  y: number;
+}
+
+/**
+ * Shipyards in `system` known (from a prior scan) to sell `shipType`, with their
+ * waypoint coordinates so a caller can pick the nearest. Reads cached
+ * `ship_types` — which a shipyard scan records even without a ship present — so
+ * we can route straight to a yard that stocks e.g. SHIP_PROBE instead of
+ * ferrying to the nearest yard that may not sell it at all.
+ */
+export function findShipyardsSellingShipType(system: string, shipType: string): ShipyardSeller[] {
+  return getDb()
+    .prepare(
+      `SELECT y.symbol AS symbol, w.x AS x, w.y AS y
+       FROM shipyards y
+       JOIN waypoints w ON w.symbol = y.symbol
+       WHERE y.system = ? AND y.ship_types LIKE ?`,
+    )
+    .all(system, `%"${shipType}"%`) as unknown as ShipyardSeller[];
+}
+
 export function upsertShip(ship: Ship, role?: string): void {
   const db = getDb();
   db.prepare(
@@ -439,7 +463,8 @@ export function findBestArbitrage(system: string, minProfit = 1): ArbitrageRoute
          ON s.trade_symbol = b.trade_symbol AND s.system = b.system AND s.waypoint <> b.waypoint
        WHERE b.system = ? AND b.purchase_price > 0 AND s.sell_price > 0
          AND (s.sell_price - b.purchase_price) >= ?
-       ORDER BY profitPerUnit DESC
+       ORDER BY (s.sell_price - b.purchase_price) *
+                MIN(COALESCE(b.trade_volume, 1000000), COALESCE(s.trade_volume, 1000000)) DESC
        LIMIT 1`,
     )
     .get(system, minProfit) as ArbitrageRoute | undefined;
@@ -468,7 +493,8 @@ export function findArbitrageRoutes(
          ON s.trade_symbol = b.trade_symbol AND s.system = b.system AND s.waypoint <> b.waypoint
        WHERE b.system = ? AND b.purchase_price > 0 AND s.sell_price > 0
          AND (s.sell_price - b.purchase_price) >= ?
-       ORDER BY profitPerUnit DESC
+       ORDER BY (s.sell_price - b.purchase_price) *
+                MIN(COALESCE(b.trade_volume, 1000000), COALESCE(s.trade_volume, 1000000)) DESC
        LIMIT ?`,
     )
     .all(system, minProfit, limit) as unknown as ArbitrageRoute[];
@@ -498,7 +524,8 @@ export function findCrossSystemArbitrageRoutes(
          ON s.trade_symbol = b.trade_symbol AND s.system <> b.system
        WHERE b.purchase_price > 0 AND s.sell_price > 0
          AND (s.sell_price - b.purchase_price) >= ?
-       ORDER BY profitPerUnit DESC
+       ORDER BY (s.sell_price - b.purchase_price) *
+                MIN(COALESCE(b.trade_volume, 1000000), COALESCE(s.trade_volume, 1000000)) DESC
        LIMIT ?`,
     )
     .all(minProfit, limit) as unknown as (ArbitrageRoute & {

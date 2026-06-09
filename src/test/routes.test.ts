@@ -18,7 +18,7 @@ function route(p: Partial<ArbitrageRoute>): ArbitrageRoute {
     sellPrice: 200,
     profitPerUnit: 100,
     tradeVolume: 10,
-    sellVolume: 10,
+    sellVolume: null,
     ...p,
   };
 }
@@ -39,6 +39,27 @@ test('routeScore can rank a fat-volume route above a thin high-margin one', () =
   const thin = route({ good: 'A', profitPerUnit: 300, tradeVolume: 2 }); // 300*2 = 600
   const fat = route({ good: 'B', profitPerUnit: 80, tradeVolume: 40 }); // 80*40 = 3200
   assert.ok(routeScore(fat, 40) > routeScore(thin, 40));
+});
+
+test('routeScore caps movable units by sell-market depth', () => {
+  // Buy side could fill the hold (40), but the sell market only absorbs 5/step.
+  // With the default x3 depth multiple that is 15 units: 100 * 15 = 1500.
+  assert.equal(routeScore(route({ profitPerUnit: 100, tradeVolume: 40, sellVolume: 5 }), 40), 1500);
+  // Deep sell market (>= hold after the multiple) -> full hold: 100 * 40 = 4000.
+  assert.equal(routeScore(route({ profitPerUnit: 100, tradeVolume: 40, sellVolume: 40 }), 40), 4000);
+});
+
+test('routeScore: thin sell depth sinks a high-margin route below a deep one', () => {
+  // Thin: huge per-unit spread but the sink only clears ~6 units (2 * 3).
+  const thinSink = route({ good: 'A', profitPerUnit: 300, tradeVolume: 40, sellVolume: 2 });
+  // Deep: modest spread but absorbs a full hold.
+  const deepSink = route({ good: 'B', profitPerUnit: 80, tradeVolume: 40, sellVolume: 40 });
+  assert.ok(routeScore(deepSink, 40) > routeScore(thinSink, 40));
+});
+
+test('routeScore treats unknown sell depth as no extra cap', () => {
+  // sellVolume null -> only hold/buy bound it: 100 * 40 = 4000.
+  assert.equal(routeScore(route({ profitPerUnit: 100, tradeVolume: 40, sellVolume: null }), 40), 4000);
 });
 
 test('assignRoutes picks distinct goods and sell waypoints, best score first', () => {

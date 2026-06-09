@@ -15,6 +15,12 @@
 import type { PriceRow } from '../state/repos.js';
 
 /**
+ * Default number of sell-market depth "steps" a single buy may span. Shared by
+ * the trader (execution cap) and route ranking (so scoring matches behavior).
+ */
+export const DEFAULT_SELL_DEPTH_MULTIPLE = 3;
+
+/**
  * Split `total` units into a sequence of chunk sizes no larger than
  * `tradeVolume`. A non-positive `tradeVolume` means "no limit" (one chunk).
  */

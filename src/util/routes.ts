@@ -1,16 +1,28 @@
 import type { ArbitrageRoute } from '../state/repos.js';
 import type { FlightMode } from '../types/index.js';
+import { depthCappedBuyUnits, DEFAULT_SELL_DEPTH_MULTIPLE } from './depth.js';
 
 /**
  * Profit-per-trip proxy for ranking routes. Per-unit spread alone favours thin,
  * high-margin goods that a market can only clear a few units of; multiplying by
- * the number of units a single hold-fill can actually move (bounded by the
- * market's trade volume) rewards routes that turn the whole cargo bay over at a
- * profit. A missing/zero trade volume is treated as "fills the hold".
+ * the number of units a single hold-fill can actually move rewards routes that
+ * turn the whole cargo bay over at a profit.
+ *
+ * Movable units are bounded by three limits: the hold size, the buy market's
+ * per-fill `tradeVolume`, and — crucially — how much the destination can absorb
+ * near full price (`sellVolume`, allowing a few depth steps). Ignoring sell
+ * depth is what over-ranked the thin high-value goods that stranded cargo (the
+ * `-9` SHIP_PARTS trap). A missing/zero volume on either side is treated as "no
+ * limit" for that side.
  */
-export function routeScore(route: ArbitrageRoute, holdSize = 40): number {
-  const vol = route.tradeVolume && route.tradeVolume > 0 ? route.tradeVolume : holdSize;
-  const movable = Math.min(vol, holdSize);
+export function routeScore(
+  route: ArbitrageRoute,
+  holdSize = 40,
+  sellDepthMultiple = DEFAULT_SELL_DEPTH_MULTIPLE,
+): number {
+  const buyVol = route.tradeVolume && route.tradeVolume > 0 ? route.tradeVolume : holdSize;
+  const byBuy = Math.min(buyVol, holdSize);
+  const movable = depthCappedBuyUnits(byBuy, route.sellVolume, sellDepthMultiple);
   return route.profitPerUnit * movable;
 }
 

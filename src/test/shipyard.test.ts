@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { selectShipyard, type ShipyardCandidate } from '../util/shipyard.js';
+import {
+  selectShipyard,
+  orderShipyardsForPurchase,
+  type ShipyardCandidate,
+} from '../util/shipyard.js';
 
 const YARDS: ShipyardCandidate[] = [
   { symbol: 'X1-A20-A2', x: 10, y: 10 },
@@ -57,4 +61,40 @@ test('single-yard list returns that yard regardless of origin', () => {
   const one: ShipyardCandidate[] = [{ symbol: 'ONLY', x: 99, y: 99 }];
   assert.equal(selectShipyard(one), 'ONLY');
   assert.equal(selectShipyard(one, { from: { x: 0, y: 0 } }), 'ONLY');
+});
+
+test('orderShipyardsForPurchase puts known sellers first', () => {
+  // B7 is nearest overall, but only A2 and C9 are known to sell the type.
+  const order = orderShipyardsForPurchase(YARDS, new Set(['X1-A20-A2', 'X1-A20-C9']), {
+    from: { x: 0, y: 0 },
+  });
+  // Known sellers first (nearest among them: A2 at (10,10) before C9 at (30,40)),
+  // then the unknown B7 last despite being closest.
+  assert.deepEqual(order, ['X1-A20-A2', 'X1-A20-C9', 'X1-A20-B7']);
+});
+
+test('orderShipyardsForPurchase: no known sellers -> nearest-first discovery order', () => {
+  const order = orderShipyardsForPurchase(YARDS, new Set(), { from: { x: 1, y: 1 } });
+  assert.deepEqual(order, ['X1-A20-B7', 'X1-A20-A2', 'X1-A20-C9']);
+});
+
+test('orderShipyardsForPurchase: override leads and is not duplicated', () => {
+  const order = orderShipyardsForPurchase(YARDS, new Set(['X1-A20-C9']), {
+    override: 'X1-A20-A2',
+    from: { x: 0, y: 0 },
+  });
+  // Override first; remaining known seller C9 next; then unknown B7.
+  assert.deepEqual(order, ['X1-A20-A2', 'X1-A20-C9', 'X1-A20-B7']);
+});
+
+test('orderShipyardsForPurchase: override outside the list is still prepended', () => {
+  const order = orderShipyardsForPurchase(YARDS, new Set(), { override: 'X1-ZZ-Q1' });
+  assert.equal(order[0], 'X1-ZZ-Q1');
+  assert.equal(order.length, YARDS.length + 1);
+});
+
+test('orderShipyardsForPurchase: without origin, keeps discovery order within groups', () => {
+  const order = orderShipyardsForPurchase(YARDS, new Set(['X1-A20-C9']));
+  // Known seller C9 first, then the rest in their original discovery order.
+  assert.deepEqual(order, ['X1-A20-C9', 'X1-A20-A2', 'X1-A20-B7']);
 });

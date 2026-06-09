@@ -8,7 +8,7 @@ import {
 } from '../state/repos.js';
 import { scanMarket } from '../state/world.js';
 import { distance, travelTo } from '../util/nav.js';
-import { bestSellMarket, buyCeiling, depthCappedBuyUnits, sellFloor } from '../util/depth.js';
+import { bestSellMarket, buyCeiling, depthCappedBuyUnits, sellFloor, DEFAULT_SELL_DEPTH_MULTIPLE } from '../util/depth.js';
 import { createLogger } from '../util/logger.js';
 import { buyGoodHere } from './buyer.js';
 import { cargoUnitsOf, sellCargoHere } from './trade.js';
@@ -20,7 +20,7 @@ const log = createLogger('trader');
  * How many sell-market depth "steps" we're willing to buy in one cycle. Buying
  * more than this strands cargo when the sell price degrades below the floor.
  */
-const SELL_DEPTH_MULTIPLE = 3;
+const SELL_DEPTH_MULTIPLE = DEFAULT_SELL_DEPTH_MULTIPLE;
 
 export interface TraderOptions {
   /** Max buy->sell cycles to run before stopping. */

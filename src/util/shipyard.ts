@@ -59,3 +59,32 @@ export function selectShipyard(
 
   return shipyards[0]!.symbol;
 }
+
+/**
+ * Order shipyards for a *purchase search* of a specific ship type. Yards already
+ * known to stock the type (from a prior scan) come first so we don't waste a
+ * ferry trip on a yard that doesn't sell it (the probe-provisioning bug, where
+ * the nearest yard never sold SHIP_PROBE). An explicit `override` always leads.
+ * Within the "known sellers" and "unknown" groups, yards are ordered nearest
+ * first when an origin is supplied, otherwise in discovery order.
+ *
+ * Returns waypoint symbols. The caller ferries to each in turn, scanning to
+ * learn/confirm stock, and stops at the first that actually offers the type.
+ */
+export function orderShipyardsForPurchase(
+  shipyards: ShipyardCandidate[],
+  sellers: ReadonlySet<string>,
+  opts: SelectShipyardOptions = {},
+): string[] {
+  const override = opts.override?.trim();
+  const from = opts.from;
+  const byDistance = (a: ShipyardCandidate, b: ShipyardCandidate): number =>
+    from ? dist(a, from) - dist(b, from) : 0;
+
+  const rest = override ? shipyards.filter((y) => y.symbol !== override) : shipyards;
+  const known = rest.filter((y) => sellers.has(y.symbol)).sort(byDistance);
+  const unknown = rest.filter((y) => !sellers.has(y.symbol)).sort(byDistance);
+
+  const ordered = [...known, ...unknown].map((y) => y.symbol);
+  return override ? [override, ...ordered] : ordered;
+}
