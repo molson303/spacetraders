@@ -27,6 +27,7 @@ import {
 import { runContractPipeline } from './behaviors/contractPipeline.js';
 import { runTrader } from './behaviors/trader.js';
 import { runScanner } from './behaviors/scanner.js';
+import { canMine, runMiner } from './behaviors/miningTrader.js';
 import { findArbitrageRoutes, getWaypointRow } from './state/repos.js';
 import { assignRoutes, routeCreditsPerSecond } from './util/routes.js';
 import { distance } from './util/nav.js';
@@ -40,6 +41,8 @@ export interface FleetRoundOptions {
   scanLimit?: number;
   /** Time budget for scanners so they never become the round's long pole. */
   scanBudgetMs?: number;
+  /** How many mining-capable ships to run as dedicated miners (default 0). */
+  miners?: number;
 }
 
 export interface FleetRoundResult {
@@ -50,6 +53,7 @@ export interface FleetRoundResult {
   contractsCompleted: number;
   traderProfit: number;
   scannedMarkets: number;
+  minerEarnings: number;
 }
 
 /** A ship that can haul cargo and move under its own fuel. */
@@ -72,6 +76,7 @@ export async function runFleetRound(
   const minProfit = opts.minProfit ?? 20;
   const scanLimit = opts.scanLimit ?? 30;
   const scanBudgetMs = opts.scanBudgetMs ?? 180000;
+  const minerCount = Math.max(0, opts.miners ?? 0);
 
   const agent = await api.getMyAgent();
   const system = systemOf(agent.headquarters);
@@ -96,6 +101,7 @@ export async function runFleetRound(
     contractsCompleted: 0,
     traderProfit: 0,
     scannedMarkets: 0,
+    minerEarnings: 0,
   };
 
   if (haulers.length === 0) {
@@ -103,12 +109,24 @@ export async function runFleetRound(
     return result;
   }
 
-  // One contractor (largest cargo wins), the rest trade arbitrage.
-  const sorted = [...haulers].sort((a, b) => b.cargo.capacity - a.cargo.capacity);
-  const contractor = sorted[0]!;
+  // Opt-in mining: reserve the N largest mining-capable ships as dedicated
+  // miners (default 0 => unchanged behavior). They're pulled out of the earner
+  // pool so the contractor/trader split below only considers the rest.
+  const mineCapable = [...haulers].filter(canMine).sort((a, b) => b.cargo.capacity - a.cargo.capacity);
+  const miners = mineCapable.slice(0, minerCount);
+  const minerSet = new Set(miners.map((s) => s.symbol));
+  const earners = haulers.filter((s) => !minerSet.has(s.symbol));
+  if (miners.length > 0) {
+    log.info(`miners: [${miners.map((s) => s.symbol).join(', ')}]`);
+  }
+
+  // One contractor (largest cargo wins), the rest trade arbitrage. Drawn from
+  // the non-miner earner pool; may be empty if every hauler is mining.
+  const sorted = [...earners].sort((a, b) => b.cargo.capacity - a.cargo.capacity);
+  const contractor = sorted[0];
   const traders = sorted.slice(1);
   log.info(
-    `roles: contractor=${contractor.symbol} traders=[${traders.map((s) => s.symbol).join(', ')}] ` +
+    `roles: contractor=${contractor?.symbol ?? 'none'} traders=[${traders.map((s) => s.symbol).join(', ')}] ` +
       `scanners=[${scouts.map((s) => s.symbol).join(', ')}]`,
   );
 
@@ -144,36 +162,50 @@ export async function runFleetRound(
   // that fires as soon as the earners complete.
   let earnersDone = false;
 
-  const contractorJob = (async () => {
-    try {
-      const n = await runContractPipeline(api, contractor, system, {
-        maxContracts,
-        hq: agent.headquarters,
-      });
-      result.contractsCompleted += n;
-      log.info(`${contractor.symbol} contractor done: ${n} contract(s)`);
-      // No feasible contract this round -> don't let the largest hauler idle.
-      // Re-fetch its live nav/cargo (the pipeline may have moved it) and run it
-      // as a trader, avoiding every good the dedicated traders already claimed.
-      if (n === 0) {
-        const fresh = await api.getShip(contractor.symbol);
-        const r = await runTrader(api, fresh, system, {
-          cycles: tradeCycles,
-          minProfit,
-          avoidGoods: assignedGoods,
-        });
-        result.traderProfit += r.profit;
-        log.info(
-          `${contractor.symbol} idle-contractor traded: ${r.cycles} cycle(s) profit=${r.profit}`,
-        );
-      }
-    } catch (e) {
-      log.error(`${contractor.symbol} contractor errored: ${e}`);
-    }
-  })();
+  // The contractor only exists when at least one non-miner hauler remains.
+  const contractorJob = contractor
+    ? (async () => {
+        try {
+          const n = await runContractPipeline(api, contractor, system, {
+            maxContracts,
+            hq: agent.headquarters,
+          });
+          result.contractsCompleted += n;
+          log.info(`${contractor.symbol} contractor done: ${n} contract(s)`);
+          // No feasible contract this round -> don't let the largest hauler idle.
+          // Re-fetch its live nav/cargo (the pipeline may have moved it) and run
+          // it as a trader, avoiding goods the dedicated traders already claimed.
+          if (n === 0) {
+            const fresh = await api.getShip(contractor.symbol);
+            const r = await runTrader(api, fresh, system, {
+              cycles: tradeCycles,
+              minProfit,
+              avoidGoods: assignedGoods,
+            });
+            result.traderProfit += r.profit;
+            log.info(
+              `${contractor.symbol} idle-contractor traded: ${r.cycles} cycle(s) profit=${r.profit}`,
+            );
+          }
+        } catch (e) {
+          log.error(`${contractor.symbol} contractor errored: ${e}`);
+        }
+      })()
+    : undefined;
+
+  const minerJobs: Promise<unknown>[] = miners.map((ship) =>
+    runMiner(api, ship, system).then(
+      (r) => {
+        result.minerEarnings += r.earned;
+        log.info(`${ship.symbol} miner done: sold ${r.sold} unit(s) earned=${r.earned}`);
+      },
+      (e) => log.error(`${ship.symbol} miner errored: ${e}`),
+    ),
+  );
 
   const earnerJobs: Promise<unknown>[] = [
-    contractorJob,
+    ...(contractorJob ? [contractorJob] : []),
+    ...minerJobs,
     ...traders.map((ship, i) =>
       runTrader(api, ship, system, {
         cycles: tradeCycles,
@@ -224,10 +256,11 @@ async function main(): Promise<void> {
     tradeCycles: Number(process.env.TRADE_CYCLES ?? 5),
     minProfit: Number(process.env.MIN_PROFIT ?? 20),
     scanLimit: Number(process.env.SCAN_LIMIT ?? 30),
+    miners: Number(process.env.MINERS ?? 0),
   });
   log.info(
     `orchestrator done | credits=${r.endCredits} (Δ${r.endCredits - r.startCredits}) ` +
-      `contracts=${r.contractsCompleted} traderProfit=${r.traderProfit}`,
+      `contracts=${r.contractsCompleted} traderProfit=${r.traderProfit} minerEarnings=${r.minerEarnings}`,
   );
   closeDb();
 }

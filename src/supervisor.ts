@@ -16,6 +16,8 @@
  *                    and reinvest fires right after (default 180000 = 3 min)
  *   REST_MS          pause between rounds (default 5000)
  *   MAX_ROUNDS       stop after N rounds (default 0 = unlimited)
+ *   MINERS           run this many mining-capable ships as dedicated miners
+ *                    each round (default 0 = no mining, unchanged behavior)
  *   REINVEST         "1" to auto-buy ships from surplus (default 1)
  *   RESERVE          credits to keep on hand, never spent on ships (default 75000)
  *   MAX_SHIPS        fleet size cap for reinvestment (default 8)
@@ -53,6 +55,7 @@ const CFG = {
   scanBudgetMs: Number(process.env.SCAN_BUDGET_MS ?? 180000),
   restMs: Number(process.env.REST_MS ?? 5000),
   maxRounds: Number(process.env.MAX_ROUNDS ?? 0),
+  miners: Number(process.env.MINERS ?? 0),
   reinvest: (process.env.REINVEST ?? '1') === '1',
   reserve: Number(process.env.RESERVE ?? 75000),
   maxShips: Number(process.env.MAX_SHIPS ?? 8),
@@ -222,12 +225,14 @@ async function main(): Promise<void> {
         minProfit: CFG.minProfit,
         scanLimit: CFG.scanLimit,
         scanBudgetMs: CFG.scanBudgetMs,
+        miners: CFG.miners,
       });
       const dt = Math.round((Date.now() - t0) / 1000);
       log.info(
         `===== round ${round} done in ${dt}s | credits=${r.endCredits} ` +
           `(round Δ${r.endCredits - r.startCredits}, total Δ${r.endCredits - baseline}) ` +
-          `contracts=${r.contractsCompleted} traderProfit=${r.traderProfit} scanned=${r.scannedMarkets} =====`,
+          `contracts=${r.contractsCompleted} traderProfit=${r.traderProfit} ` +
+          `minerEarnings=${r.minerEarnings} scanned=${r.scannedMarkets} =====`,
       );
     } catch (err) {
       log.error(`round ${round} failed: ${(err as Error).message}`);
