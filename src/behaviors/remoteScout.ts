@@ -14,7 +14,7 @@
  */
 
 import type { SpaceTradersApi } from '../client/api.js';
-import { findJumpGatesBySystem, findWaypointsByTrait, getJumpGateRow } from '../state/repos.js';
+import { findJumpGatesBySystem, findWaypointsByTrait, getJumpGateRow, isWaypointUnderConstruction } from '../state/repos.js';
 import { kvGet } from '../state/kv.js';
 import {
   hydrateJumpGates,
@@ -66,6 +66,13 @@ export async function runRemoteScout(
   const homeGate = findJumpGatesBySystem(homeSystem)[0];
   if (!homeGate) {
     log.warn(`no jump gate known in ${homeSystem}; cannot scout`);
+    return { scannedSystems: 0 };
+  }
+
+  // A gate under construction rejects every jump, so a remote scout can only
+  // waste a probe trip out to a dead gate. Bail before moving.
+  if (isWaypointUnderConstruction(homeGate.symbol)) {
+    log.info(`jump gate ${homeGate.symbol} under construction; remote scout disabled`);
     return { scannedSystems: 0 };
   }
 

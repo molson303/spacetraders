@@ -38,6 +38,7 @@ import {
   findJumpGatesBySystem,
   getJumpGateRow,
   getWaypointRow,
+  isWaypointUnderConstruction,
 } from './state/repos.js';
 import { assignRoutes, routeCreditsPerSecond, routeScore } from './util/routes.js';
 import { findJumpPath } from './util/jumpPath.js';
@@ -180,11 +181,25 @@ export async function runFleetRound(
   const bestLocalScore = candidates.length
     ? Math.max(...candidates.map((r) => routeScore(r, holdSize)))
     : 0;
-  const rankedCross = rankCrossRoutes(
-    findCrossSystemArbitrageRoutes(minProfit) as CrossSystemRoute[],
-    hopsBetween,
-    { holdSize, antimatterCost: crossAntimatterCost },
-  ).filter((r) => r.netProfit > bestLocalScore);
+
+  // Cross-system travel requires the home jump gate to be operational. While the
+  // gate is under construction every jump out of the system fails, so disable
+  // remote arbitrage and scouting for the round and fall back to local trading.
+  const homeGate = findJumpGatesBySystem(system)[0];
+  const gateBlocked = homeGate ? isWaypointUnderConstruction(homeGate.symbol) : true;
+  if (gateBlocked) {
+    log.info(
+      `jump gate ${homeGate?.symbol ?? system} unavailable (under construction); cross-system disabled this round`,
+    );
+  }
+
+  const rankedCross = gateBlocked
+    ? []
+    : rankCrossRoutes(
+        findCrossSystemArbitrageRoutes(minProfit) as CrossSystemRoute[],
+        hopsBetween,
+        { holdSize, antimatterCost: crossAntimatterCost },
+      ).filter((r) => r.netProfit > bestLocalScore);
   const crossAssigned = assignCrossRoutes(rankedCross, traders.length);
 
   // Freighters that drew a remote route haul cross-system; the rest trade local.
@@ -300,7 +315,7 @@ export async function runFleetRound(
   const scannerJobs: Promise<unknown>[] = scouts.map((ship, idx) =>
     (async () => {
       try {
-        if (idx === 0) {
+        if (idx === 0 && !gateBlocked) {
           const scouted = await runRemoteScout(api, ship, system, {
             budgetMs: scanBudgetMs,
             shouldStop: () => earnersDone,

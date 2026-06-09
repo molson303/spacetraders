@@ -292,6 +292,17 @@ export function getWaypointRow(symbol: string): WaypointRow | undefined {
   return r ? parseWaypointRow(r) : undefined;
 }
 
+/**
+ * Whether a waypoint is flagged as under construction in the local DB.
+ * Unknown waypoints (not yet hydrated) are treated as NOT under construction.
+ */
+export function isWaypointUnderConstruction(symbol: string): boolean {
+  const r = getDb()
+    .prepare('SELECT is_under_construction FROM waypoints WHERE symbol = ?')
+    .get(symbol) as { is_under_construction: number } | undefined;
+  return r ? r.is_under_construction === 1 : false;
+}
+
 /** Waypoints with a market that sells FUEL (exports or exchange). For routing. */
 export function findFuelWaypoints(system: string): WaypointRow[] {
   const db = getDb();
