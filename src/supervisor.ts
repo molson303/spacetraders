@@ -235,7 +235,8 @@ async function main(): Promise<void> {
           `(round Δ${r.endCredits - r.startCredits}, total Δ${r.endCredits - baseline}) ` +
           `contracts=${r.contractsCompleted} traderProfit=${r.traderProfit} ` +
           `remoteProfit=${r.remoteProfit} scouted=${r.scoutedSystems} ` +
-          `minerEarnings=${r.minerEarnings} scanned=${r.scannedMarkets} =====`,
+          `minerEarnings=${r.minerEarnings} scanned=${r.scannedMarkets} ` +
+          `stationsRefreshed=${r.stationsRefreshed} =====`,
       );
     } catch (err) {
       log.error(`round ${round} failed: ${(err as Error).message}`);

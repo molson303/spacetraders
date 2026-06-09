@@ -31,18 +31,22 @@ import { runTrader } from './behaviors/trader.js';
 import { runScanner } from './behaviors/scanner.js';
 import { runRemoteScout } from './behaviors/remoteScout.js';
 import { runRemoteTrade } from './behaviors/remoteTrader.js';
+import { runStationKeeping } from './behaviors/stationKeeper.js';
 import { canMine, runMiner } from './behaviors/miningTrader.js';
 import {
   findArbitrageRoutes,
   findCrossSystemArbitrageRoutes,
   findJumpGatesBySystem,
+  findWaypointsByTrait,
   getJumpGateRow,
   getWaypointRow,
   isWaypointUnderConstruction,
 } from './state/repos.js';
+import { kvGet } from './state/kv.js';
 import { assignRoutes, routeCreditsPerSecond, routeScore } from './util/routes.js';
 import { findJumpPath } from './util/jumpPath.js';
 import { rankCrossRoutes, assignCrossRoutes, type CrossSystemRoute } from './util/crossRoutes.js';
+import { partitionProbes, type StationAssignment } from './util/stations.js';
 import { distance } from './util/nav.js';
 import { log } from './util/logger.js';
 import type { Ship } from './types/index.js';
@@ -71,6 +75,7 @@ export interface FleetRoundResult {
   minerEarnings: number;
   remoteProfit: number;
   scoutedSystems: number;
+  stationsRefreshed: number;
 }
 
 /** A ship that can haul cargo and move under its own fuel. */
@@ -123,6 +128,7 @@ export async function runFleetRound(
     minerEarnings: 0,
     remoteProfit: 0,
     scoutedSystems: 0,
+    stationsRefreshed: 0,
   };
 
   if (haulers.length === 0) {
@@ -150,6 +156,32 @@ export async function runFleetRound(
     `roles: contractor=${contractor?.symbol ?? 'none'} traders=[${traders.map((s) => s.symbol).join(', ')}] ` +
       `scanners=[${scouts.map((s) => s.symbol).join(', ')}]`,
   );
+
+  // Cross-system travel requires the home jump gate to be operational. While the
+  // gate is under construction every jump out of the system fails, so disable
+  // remote arbitrage/scouting and cross-system station-keeping this round.
+  const homeGate = findJumpGatesBySystem(system)[0];
+  const gateBlocked = homeGate ? isWaypointUnderConstruction(homeGate.symbol) : true;
+  if (gateBlocked) {
+    log.info(
+      `jump gate ${homeGate?.symbol ?? system} unavailable (under construction); cross-system disabled this round`,
+    );
+  }
+
+  // Stationed probes sit at markets and refresh live prices in place. Run this
+  // BEFORE route-finding so traders compute against fresh data instead of stale
+  // spreads (the cause of wasted "bought nothing" trips). Probes left over after
+  // stationing form the flex pool used for roving/remote scouting below.
+  const stations = kvGet<StationAssignment[]>('probe_stations') ?? [];
+  const { stationed, flex } = partitionProbes(scouts, stations);
+  const flexProbes = scouts.filter((s) => flex.includes(s.symbol));
+  if (stationed.length > 0) {
+    log.info(`station keepers: ${stationed.length}, flex probes: ${flexProbes.length}`);
+    const sk = await runStationKeeping(api, scouts, stationed, {
+      allowCrossSystem: !gateBlocked,
+    });
+    result.stationsRefreshed += sk.refreshed;
+  }
 
   // Assign each trader a distinct, non-overlapping route up front so concurrent
   // traders don't pile onto the same good and collapse its spread. Traders stick
@@ -181,17 +213,6 @@ export async function runFleetRound(
   const bestLocalScore = candidates.length
     ? Math.max(...candidates.map((r) => routeScore(r, holdSize)))
     : 0;
-
-  // Cross-system travel requires the home jump gate to be operational. While the
-  // gate is under construction every jump out of the system fails, so disable
-  // remote arbitrage and scouting for the round and fall back to local trading.
-  const homeGate = findJumpGatesBySystem(system)[0];
-  const gateBlocked = homeGate ? isWaypointUnderConstruction(homeGate.symbol) : true;
-  if (gateBlocked) {
-    log.info(
-      `jump gate ${homeGate?.symbol ?? system} unavailable (under construction); cross-system disabled this round`,
-    );
-  }
 
   const rankedCross = gateBlocked
     ? []
@@ -308,11 +329,13 @@ export async function runFleetRound(
     ),
   ];
 
-  // Scouts ride the gates into unscanned neighbor systems to capture remote
-  // prices (the prerequisite for cross-system arbitrage). The first scout does
-  // the remote run; when there are no unscanned neighbors it returns quickly and
-  // falls back to refreshing the local price map. Extra scouts stay local.
-  const scannerJobs: Promise<unknown>[] = scouts.map((ship, idx) =>
+  // Flex probes (those not holding a station) ride the gates into unscanned
+  // neighbor systems to capture remote prices (the prerequisite for cross-system
+  // arbitrage). The first flex probe does the remote run; when there are no
+  // unscanned neighbors it returns quickly and falls back to refreshing the
+  // local price map. Extra flex probes stay local. Stationed probes are already
+  // busy refreshing their markets above and are excluded here.
+  const scannerJobs: Promise<unknown>[] = flexProbes.map((ship, idx) =>
     (async () => {
       try {
         if (idx === 0 && !gateBlocked) {
