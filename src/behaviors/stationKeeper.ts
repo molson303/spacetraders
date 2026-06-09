@@ -23,7 +23,7 @@ const log = createLogger('stationKeeper');
 export interface StationKeeperOptions {
   /** Whether jumps are currently possible (home gate operational). */
   allowCrossSystem?: boolean;
-  /** Stop servicing further probes once this returns true. */
+  /** Skip the whole pass when this returns true (checked once, before launch). */
   shouldStop?: () => boolean;
 }
 
@@ -35,52 +35,114 @@ export interface StationKeeperResult {
 }
 
 /**
+ * Collaborators, injectable so the concurrency behavior can be unit-tested
+ * without real travel or live market scans. Defaults wire the real helpers.
+ */
+export interface StationKeeperDeps {
+  travel: (api: SpaceTradersApi, ship: Ship, destination: string) => Promise<Ship>;
+  crossTravel: (api: SpaceTradersApi, ship: Ship, destination: string) => Promise<Ship>;
+  scan: (api: SpaceTradersApi, system: string, waypoint: string) => Promise<unknown>;
+}
+
+const defaultDeps: StationKeeperDeps = {
+  travel: travelTo,
+  crossTravel: crossSystemTravelTo,
+  scan: scanMarket,
+};
+
+/** Outcome of servicing a single station; both counts are 0 or 1. */
+interface StationOutcome {
+  refreshed: number;
+  relocated: number;
+}
+
+/**
+ * Relocate (if drifted) and refresh one stationed probe's market. Throws on
+ * failure so the caller's `Promise.allSettled` isolates it from siblings.
+ */
+async function serviceStation(
+  api: SpaceTradersApi,
+  ship: Ship,
+  station: StationAssignment,
+  sameSystem: boolean,
+  deps: StationKeeperDeps,
+): Promise<StationOutcome> {
+  const targetSystem = systemOf(station.waypoint);
+  let relocated = 0;
+  const onStation =
+    ship.nav.status !== 'IN_TRANSIT' && ship.nav.waypointSymbol === station.waypoint;
+  if (!onStation) {
+    ship = sameSystem
+      ? await deps.travel(api, ship, station.waypoint)
+      : await deps.crossTravel(api, ship, station.waypoint);
+    if (ship.nav.waypointSymbol !== station.waypoint) {
+      log.warn(`${ship.symbol} failed to reach station ${station.waypoint}; skipping`);
+      return { refreshed: 0, relocated: 0 };
+    }
+    relocated = 1;
+  }
+  await deps.scan(api, targetSystem, station.waypoint);
+  return { refreshed: 1, relocated };
+}
+
+/**
  * Refresh every stationed probe's market. Probes already on station scan in
- * place; drifted probes travel to their station first. Returns counts of
- * markets refreshed and probes relocated.
+ * place; drifted probes travel to their station first. Every probe is serviced
+ * concurrently — each is independent and the client rate-limits, so navigation
+ * legs overlap instead of serializing (12 probes ferrying from a shipyard
+ * settle in roughly one max leg rather than the sum of all legs). Returns
+ * counts of markets refreshed and probes relocated.
  */
 export async function runStationKeeping(
   api: SpaceTradersApi,
   probes: Ship[],
   stations: StationAssignment[],
   opts: StationKeeperOptions = {},
+  deps: StationKeeperDeps = defaultDeps,
 ): Promise<StationKeeperResult> {
+  const result: StationKeeperResult = { refreshed: 0, relocated: 0 };
+  if (opts.shouldStop?.()) return result;
+
   const allowCross = opts.allowCrossSystem ?? false;
   const bySymbol = new Map(probes.map((p) => [p.symbol, p]));
-  const result: StationKeeperResult = { refreshed: 0, relocated: 0 };
 
+  // Resolve which stations are serviceable this pass before launching any work.
+  const serviceable: Array<{ ship: Ship; station: StationAssignment; sameSystem: boolean }> = [];
   for (const station of stations) {
-    if (opts.shouldStop?.()) break;
-    let ship = bySymbol.get(station.ship);
+    const ship = bySymbol.get(station.ship);
     if (!ship) continue;
-
-    const targetSystem = systemOf(station.waypoint);
-    const sameSystem = ship.nav.systemSymbol === targetSystem;
+    const sameSystem = ship.nav.systemSymbol === systemOf(station.waypoint);
     if (!sameSystem && !allowCross) {
-      log.debug(`${ship.symbol} station ${station.waypoint} is cross-system; jumps unavailable, skipping`);
+      log.debug(
+        `${ship.symbol} station ${station.waypoint} is cross-system; jumps unavailable, skipping`,
+      );
       continue;
     }
-
-    try {
-      const onStation =
-        ship.nav.status !== 'IN_TRANSIT' && ship.nav.waypointSymbol === station.waypoint;
-      if (!onStation) {
-        ship = sameSystem
-          ? await travelTo(api, ship, station.waypoint)
-          : await crossSystemTravelTo(api, ship, station.waypoint);
-        if (ship.nav.waypointSymbol !== station.waypoint) {
-          log.warn(`${ship.symbol} failed to reach station ${station.waypoint}; skipping`);
-          continue;
-        }
-        result.relocated++;
-      }
-      await scanMarket(api, targetSystem, station.waypoint);
-      result.refreshed++;
-    } catch (err) {
-      log.warn(`${station.ship} station-keeping at ${station.waypoint} failed: ${(err as Error).message}`);
-    }
+    serviceable.push({ ship, station, sameSystem });
   }
 
-  log.info(`station keeping: refreshed ${result.refreshed} market(s), relocated ${result.relocated} probe(s)`);
+  const outcomes = await Promise.allSettled(
+    serviceable.map(({ ship, station, sameSystem }) =>
+      serviceStation(api, ship, station, sameSystem, deps),
+    ),
+  );
+
+  outcomes.forEach((outcome, i) => {
+    if (outcome.status === 'fulfilled') {
+      result.refreshed += outcome.value.refreshed;
+      result.relocated += outcome.value.relocated;
+    } else {
+      const { station } = serviceable[i]!;
+      log.warn(
+        `${station.ship} station-keeping at ${station.waypoint} failed: ${
+          (outcome.reason as Error)?.message ?? outcome.reason
+        }`,
+      );
+    }
+  });
+
+  log.info(
+    `station keeping: refreshed ${result.refreshed} market(s), relocated ${result.relocated} probe(s)`,
+  );
   return result;
 }
