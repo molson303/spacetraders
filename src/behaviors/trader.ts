@@ -8,13 +8,19 @@ import {
 } from '../state/repos.js';
 import { scanMarket } from '../state/world.js';
 import { distance, travelTo } from '../util/nav.js';
-import { bestSellMarket, buyCeiling, sellFloor } from '../util/depth.js';
+import { bestSellMarket, buyCeiling, depthCappedBuyUnits, sellFloor } from '../util/depth.js';
 import { createLogger } from '../util/logger.js';
 import { buyGoodHere } from './buyer.js';
 import { cargoUnitsOf, sellCargoHere } from './trade.js';
 import type { Ship } from '../types/index.js';
 
 const log = createLogger('trader');
+
+/**
+ * How many sell-market depth "steps" we're willing to buy in one cycle. Buying
+ * more than this strands cargo when the sell price degrades below the floor.
+ */
+const SELL_DEPTH_MULTIPLE = 3;
 
 export interface TraderOptions {
   /** Max buy->sell cycles to run before stopping. */
@@ -94,7 +100,16 @@ async function runRoute(
   );
   ship = await travelTo(api, ship, route.buyAt);
   const freeCargo = ship.cargo.capacity - ship.cargo.units;
-  const buy = await buyGoodHere(api, ship, route.good, freeCargo, {
+  // Don't buy more than the destination sell market can absorb near full price.
+  // A full hold of a high-per-unit / thin-depth good strands cargo below the
+  // floor (the -9 SHIP_PARTS trap); cap the buy to a few sell-market steps.
+  const buyUnits = depthCappedBuyUnits(freeCargo, route.sellVolume, SELL_DEPTH_MULTIPLE);
+  if (buyUnits < freeCargo) {
+    log.info(
+      `${ship.symbol} sell-depth cap ${route.good}: ${buyUnits}/${freeCargo} (sellVol=${route.sellVolume})`,
+    );
+  }
+  const buy = await buyGoodHere(api, ship, route.good, buyUnits, {
     // Depth-aware cap: never pay so much that the spread to the sell price
     // drops below our required margin (also bails if the price spiked).
     maxPricePerUnit: Math.min(

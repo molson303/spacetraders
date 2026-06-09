@@ -18,6 +18,7 @@ function route(p: Partial<ArbitrageRoute>): ArbitrageRoute {
     sellPrice: 200,
     profitPerUnit: 100,
     tradeVolume: 10,
+    sellVolume: 10,
     ...p,
   };
 }

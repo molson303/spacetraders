@@ -11,6 +11,7 @@ function route(partial: Partial<CrossSystemRoute>): CrossSystemRoute {
     sellPrice: 30,
     profitPerUnit: 20,
     tradeVolume: 40,
+    sellVolume: 40,
     buySystem: 'X1-A20',
     sellSystem: 'X1-CN42',
     ...partial,

@@ -7,6 +7,7 @@ import {
   keepSelling,
   keepBuying,
   bestSellMarket,
+  depthCappedBuyUnits,
 } from '../util/depth.js';
 import type { PriceRow } from '../state/repos.js';
 
@@ -77,4 +78,30 @@ test('bestSellMarket excludes visited and below-floor markets', () => {
 test('bestSellMarket treats null sell price as zero', () => {
   const rows = [priceRow('A', 0, 10), { ...priceRow('B', 0), sell_price: null }];
   assert.equal(bestSellMarket(rows, [], 1), undefined);
+});
+
+test('depthCappedBuyUnits caps buy to depthMultiple sell-steps', () => {
+  // hold 40, sellVolume 5, multiple 3 -> cap at 15.
+  assert.equal(depthCappedBuyUnits(40, 5, 3), 15);
+  // cap exceeds hold -> bounded by hold.
+  assert.equal(depthCappedBuyUnits(40, 20, 3), 40);
+  // exact fit.
+  assert.equal(depthCappedBuyUnits(15, 5, 3), 15);
+});
+
+test('depthCappedBuyUnits treats unknown sell depth as no extra cap', () => {
+  assert.equal(depthCappedBuyUnits(40, null, 3), 40);
+  assert.equal(depthCappedBuyUnits(40, 0, 3), 40);
+  assert.equal(depthCappedBuyUnits(40, undefined, 3), 40);
+});
+
+test('depthCappedBuyUnits clamps multiple to at least one step', () => {
+  // multiple 0 -> still allow one full step (5), bounded by hold.
+  assert.equal(depthCappedBuyUnits(40, 5, 0), 5);
+  assert.equal(depthCappedBuyUnits(3, 5, 0), 3);
+});
+
+test('depthCappedBuyUnits returns 0 for a full hold', () => {
+  assert.equal(depthCappedBuyUnits(0, 5, 3), 0);
+  assert.equal(depthCappedBuyUnits(-2, 5, 3), 0);
 });

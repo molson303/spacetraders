@@ -65,6 +65,30 @@ export function keepBuying(lastRealizedPrice: number, ceiling: number): boolean 
   return lastRealizedPrice <= ceiling;
 }
 
+/**
+ * Cap how many units to buy so the destination sell market can actually absorb
+ * the hold near full price. The sell market's depth is one `sellVolume` "step";
+ * pushing many steps deep craters the realized price below the profit floor and
+ * strands cargo (the `-9` SHIP_PARTS trap: high per-unit good, thin sell depth,
+ * full hold bought, only a fraction sold above floor).
+ *
+ * Buy at most `depthMultiple` sell-steps' worth, always bounded by `freeCargo`.
+ * A non-positive `sellVolume` is treated as "unknown depth" → no extra cap
+ * beyond the hold. `depthMultiple` is clamped to at least 1 so we never refuse
+ * to buy a single step.
+ */
+export function depthCappedBuyUnits(
+  freeCargo: number,
+  sellVolume: number | null | undefined,
+  depthMultiple: number,
+): number {
+  if (freeCargo <= 0) return 0;
+  if (!sellVolume || sellVolume <= 0) return freeCargo;
+  const steps = Math.max(1, depthMultiple);
+  const cap = Math.max(1, Math.floor(sellVolume * steps));
+  return Math.min(freeCargo, cap);
+}
+
 export interface AltSellMarket {
   waypoint: string;
   sellPrice: number;

@@ -412,7 +412,14 @@ export interface ArbitrageRoute {
   sellAt: string;
   sellPrice: number;
   profitPerUnit: number;
+  /** Buy market's per-fill trade volume (one purchase "step"). */
   tradeVolume: number | null;
+  /**
+   * Sell market's per-fill trade volume — how much the destination can absorb
+   * per price "step". Used to size buys so a full hold isn't dumped into a thin
+   * market below the profit floor.
+   */
+  sellVolume: number | null;
 }
 
 /**
@@ -425,7 +432,8 @@ export function findBestArbitrage(system: string, minProfit = 1): ArbitrageRoute
     .prepare(
       `SELECT b.trade_symbol AS good, b.waypoint AS buyAt, b.purchase_price AS buyPrice,
               s.waypoint AS sellAt, s.sell_price AS sellPrice,
-              (s.sell_price - b.purchase_price) AS profitPerUnit, b.trade_volume AS tradeVolume
+              (s.sell_price - b.purchase_price) AS profitPerUnit, b.trade_volume AS tradeVolume,
+              s.trade_volume AS sellVolume
        FROM market_latest b
        JOIN market_latest s
          ON s.trade_symbol = b.trade_symbol AND s.system = b.system AND s.waypoint <> b.waypoint
@@ -453,7 +461,8 @@ export function findArbitrageRoutes(
     .prepare(
       `SELECT b.trade_symbol AS good, b.waypoint AS buyAt, b.purchase_price AS buyPrice,
               s.waypoint AS sellAt, s.sell_price AS sellPrice,
-              (s.sell_price - b.purchase_price) AS profitPerUnit, b.trade_volume AS tradeVolume
+              (s.sell_price - b.purchase_price) AS profitPerUnit, b.trade_volume AS tradeVolume,
+              s.trade_volume AS sellVolume
        FROM market_latest b
        JOIN market_latest s
          ON s.trade_symbol = b.trade_symbol AND s.system = b.system AND s.waypoint <> b.waypoint
@@ -482,6 +491,7 @@ export function findCrossSystemArbitrageRoutes(
       `SELECT b.trade_symbol AS good, b.waypoint AS buyAt, b.purchase_price AS buyPrice,
               s.waypoint AS sellAt, s.sell_price AS sellPrice,
               (s.sell_price - b.purchase_price) AS profitPerUnit, b.trade_volume AS tradeVolume,
+              s.trade_volume AS sellVolume,
               b.system AS buySystem, s.system AS sellSystem
        FROM market_latest b
        JOIN market_latest s
