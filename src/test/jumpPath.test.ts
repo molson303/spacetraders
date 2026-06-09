@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { findJumpPath, directNeighborSystems } from '../util/jumpPath.js';
+import { findJumpPath, directNeighborSystems, pickScoutTargets } from '../util/jumpPath.js';
 
 // A small gate graph. Gate waypoints follow X1-<SYSTEM>-<id>; systemOf strips
 // to the first two segments.
@@ -59,4 +59,20 @@ test('directNeighborSystems lists the distinct systems one jump away', () => {
     'X1-CY96',
     'X1-GK27',
   ]);
+});
+
+test('pickScoutTargets returns unscanned neighbor systems only', () => {
+  const scanned = new Set(['X1-CY96']);
+  const targets = pickScoutTargets(
+    'X1-A20-I56',
+    neighbors,
+    systemOf,
+    (s) => scanned.has(s),
+  ).sort();
+  assert.deepEqual(targets, ['X1-CN42', 'X1-GK27']);
+});
+
+test('pickScoutTargets returns empty when all neighbors are scanned', () => {
+  const targets = pickScoutTargets('X1-A20-I56', neighbors, systemOf, () => true);
+  assert.deepEqual(targets, []);
 });

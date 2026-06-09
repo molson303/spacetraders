@@ -81,3 +81,29 @@ export function rankCrossRoutes(
   ranked.sort((a, b) => b.netProfit - a.netProfit || a.hops - b.hops);
   return ranked;
 }
+
+/**
+ * Pick up to `count` distinct, non-overlapping cross-system routes for a fleet
+ * of remote traders, best net profit first. Like `assignRoutes` but for ranked
+ * cross-system routes: two traders may not share a good or a sell waypoint, so
+ * they don't drain the same remote market and collapse the spread. Input is
+ * assumed already ranked (e.g. from {@link rankCrossRoutes}); rank order is
+ * preserved.
+ */
+export function assignCrossRoutes(
+  ranked: RankedCrossRoute[],
+  count: number,
+): RankedCrossRoute[] {
+  if (count <= 0) return [];
+  const chosen: RankedCrossRoute[] = [];
+  const goods = new Set<string>();
+  const sells = new Set<string>();
+  for (const r of ranked) {
+    if (chosen.length >= count) break;
+    if (goods.has(r.route.good) || sells.has(r.route.sellAt)) continue;
+    goods.add(r.route.good);
+    sells.add(r.route.sellAt);
+    chosen.push(r);
+  }
+  return chosen;
+}

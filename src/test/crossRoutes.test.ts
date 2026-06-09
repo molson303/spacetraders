@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { crossRouteNetProfit, rankCrossRoutes, type CrossSystemRoute } from '../util/crossRoutes.js';
+import { crossRouteNetProfit, rankCrossRoutes, assignCrossRoutes, type CrossSystemRoute } from '../util/crossRoutes.js';
 
 function route(partial: Partial<CrossSystemRoute>): CrossSystemRoute {
   return {
@@ -83,4 +83,36 @@ test('rankCrossRoutes orders by net profit then fewer hops', () => {
   // small (1 hop) outranks far (2 hops) on the tie at 800.
   assert.equal(ranked[1]!.hops, 1);
   assert.equal(ranked[2]!.hops, 2);
+});
+
+test('assignCrossRoutes picks distinct non-overlapping routes up to count', () => {
+  const ranked = rankCrossRoutes(
+    [
+      route({ good: 'GOLD', profitPerUnit: 30, sellAt: 'X1-CN42-B1', sellSystem: 'X1-CN42' }),
+      route({ good: 'IRON_ORE', profitPerUnit: 20, sellAt: 'X1-CN42-B2', sellSystem: 'X1-CN42' }),
+      route({ good: 'COPPER', profitPerUnit: 10, sellAt: 'X1-ZZ99-C1', sellSystem: 'X1-ZZ99' }),
+    ],
+    hopsBetween,
+  );
+  const picked = assignCrossRoutes(ranked, 2);
+  assert.deepEqual(picked.map((r) => r.route.good), ['GOLD', 'IRON_ORE']);
+});
+
+test('assignCrossRoutes skips routes sharing a good or sell waypoint', () => {
+  const ranked = rankCrossRoutes(
+    [
+      route({ good: 'GOLD', profitPerUnit: 30, sellAt: 'X1-CN42-B1', sellSystem: 'X1-CN42' }),
+      // same sell waypoint as GOLD -> must be skipped
+      route({ good: 'IRON_ORE', profitPerUnit: 25, sellAt: 'X1-CN42-B1', sellSystem: 'X1-CN42' }),
+      route({ good: 'COPPER', profitPerUnit: 20, sellAt: 'X1-CN42-B2', sellSystem: 'X1-CN42' }),
+    ],
+    hopsBetween,
+  );
+  const picked = assignCrossRoutes(ranked, 3);
+  assert.deepEqual(picked.map((r) => r.route.good), ['GOLD', 'COPPER']);
+});
+
+test('assignCrossRoutes returns empty for non-positive count', () => {
+  const ranked = rankCrossRoutes([route({})], hopsBetween);
+  assert.deepEqual(assignCrossRoutes(ranked, 0), []);
 });

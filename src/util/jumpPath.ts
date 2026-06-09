@@ -62,3 +62,17 @@ export function directNeighborSystems(
   for (const conn of neighbors(gate)) out.add(systemOf(conn));
   return [...out];
 }
+
+/**
+ * Directly-reachable neighbor systems that have NOT yet been scanned — the
+ * scout's work list. Pure: `isScanned` is injected so callers can back it with
+ * a kv cache flag or DB presence check.
+ */
+export function pickScoutTargets(
+  gate: string,
+  neighbors: (gate: string) => string[],
+  systemOf: (waypoint: string) => string,
+  isScanned: (system: string) => boolean,
+): string[] {
+  return directNeighborSystems(gate, neighbors, systemOf).filter((s) => !isScanned(s));
+}
