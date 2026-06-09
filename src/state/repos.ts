@@ -454,6 +454,38 @@ export function findArbitrageRoutes(
     .all(system, minProfit, limit) as unknown as ArbitrageRoute[];
 }
 
+/**
+ * Buy-low / sell-high candidates where the buy and sell waypoints live in
+ * DIFFERENT systems. Mirrors {@link findArbitrageRoutes} but drops the
+ * same-system constraint and carries the buy/sell system symbols so a caller
+ * can rank by net profit after jump costs (see `rankCrossRoutes`). Reachability
+ * is NOT considered here — only hydrated prices — so the caller must filter by
+ * jump topology. Ranked by raw per-unit spread.
+ */
+export function findCrossSystemArbitrageRoutes(
+  minProfit = 1,
+  limit = 50,
+): (ArbitrageRoute & { buySystem: string; sellSystem: string })[] {
+  return getDb()
+    .prepare(
+      `SELECT b.trade_symbol AS good, b.waypoint AS buyAt, b.purchase_price AS buyPrice,
+              s.waypoint AS sellAt, s.sell_price AS sellPrice,
+              (s.sell_price - b.purchase_price) AS profitPerUnit, b.trade_volume AS tradeVolume,
+              b.system AS buySystem, s.system AS sellSystem
+       FROM market_latest b
+       JOIN market_latest s
+         ON s.trade_symbol = b.trade_symbol AND s.system <> b.system
+       WHERE b.purchase_price > 0 AND s.sell_price > 0
+         AND (s.sell_price - b.purchase_price) >= ?
+       ORDER BY profitPerUnit DESC
+       LIMIT ?`,
+    )
+    .all(minProfit, limit) as unknown as (ArbitrageRoute & {
+    buySystem: string;
+    sellSystem: string;
+  })[];
+}
+
 /** Marketplace waypoints in a system that have NO captured prices yet. */
 export function findUnpricedMarkets(system: string): WaypointRow[] {
   const db = getDb();
