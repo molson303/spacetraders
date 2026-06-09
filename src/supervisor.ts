@@ -19,14 +19,17 @@
  *   REINVEST         "1" to auto-buy ships from surplus (default 1)
  *   RESERVE          credits to keep on hand, never spent on ships (default 75000)
  *   MAX_SHIPS        fleet size cap for reinvestment (default 8)
- *   REINVEST_YARD    shipyard waypoint to buy at (default X1-A20-A2)
+ *   REINVEST_YARD    optional override of the shipyard to buy at; when unset the
+ *                    home system is auto-scanned for SHIPYARD waypoints and the
+ *                    nearest one is used
  *   SHIP_COST_EST    min surplus (credits-reserve) before bothering to scan the
  *                    yard for a buy (default 90000)
  *   MIN_ROI          skip buys whose ROI (earn weight / price) is below this
  *                    (default 0 = buy any affordable cargo ship)
  *   REPAIR           "1" to auto-repair worn ships between rounds (default 1)
  *   REPAIR_THRESHOLD condition at/below which a ship is repaired (default 0.4)
- *   REPAIR_YARD      shipyard to repair at (default REINVEST_YARD)
+ *   REPAIR_YARD      optional override of the shipyard to repair at; defaults to
+ *                    REINVEST_YARD, else auto-discovered like REINVEST_YARD
  */
 import { SpaceTradersApi } from './client/api.js';
 import { closeDb } from './state/db.js';
@@ -34,8 +37,10 @@ import { runFleetRound } from './orchestrator.js';
 import { purchaseShipAt } from './behaviors/fleet.js';
 import { maybeRepair } from './behaviors/maintenance.js';
 import { scanShipyard, systemOf } from './state/world.js';
+import { findWaypointsByTrait, getWaypointRow } from './state/repos.js';
 import { travelTo } from './util/nav.js';
 import { bestReinvestShip, earnWeight } from './util/reinvest.js';
+import { selectShipyard, type ShipyardCandidate } from './util/shipyard.js';
 import { sleep } from './client/rateLimiter.js';
 import { log } from './util/logger.js';
 import type { ShipType } from './types/index.js';
@@ -51,13 +56,38 @@ const CFG = {
   reinvest: (process.env.REINVEST ?? '1') === '1',
   reserve: Number(process.env.RESERVE ?? 75000),
   maxShips: Number(process.env.MAX_SHIPS ?? 8),
-  reinvestYard: process.env.REINVEST_YARD ?? 'X1-A20-A2',
+  reinvestYard: process.env.REINVEST_YARD?.trim() || undefined,
   shipCostEst: Number(process.env.SHIP_COST_EST ?? 90000),
   minRoi: Number(process.env.MIN_ROI ?? 0),
   repair: (process.env.REPAIR ?? '1') === '1',
   repairThreshold: Number(process.env.REPAIR_THRESHOLD ?? 0.4),
-  repairYard: process.env.REPAIR_YARD ?? process.env.REINVEST_YARD ?? 'X1-A20-A2',
+  repairYard: process.env.REPAIR_YARD?.trim() || process.env.REINVEST_YARD?.trim() || undefined,
 };
+
+/**
+ * Discover the shipyard to use for a given purpose. Honors an explicit operator
+ * override (REINVEST_YARD / REPAIR_YARD); otherwise auto-discovers SHIPYARD
+ * waypoints in the agent's home system and picks the one nearest to `from`
+ * (falling back to the first). Returns undefined when nothing is available.
+ */
+function discoverShipyard(
+  system: string,
+  override: string | undefined,
+  from: { x: number; y: number } | undefined,
+): string | undefined {
+  const candidates: ShipyardCandidate[] = findWaypointsByTrait(system, 'SHIPYARD').map((w) => ({
+    symbol: w.symbol,
+    x: w.x,
+    y: w.y,
+  }));
+  return selectShipyard(candidates, { override, from });
+}
+
+/** Coordinates of a waypoint, if known in the local world cache. */
+function coordsOf(symbol: string): { x: number; y: number } | undefined {
+  const wp = getWaypointRow(symbol);
+  return wp ? { x: wp.x, y: wp.y } : undefined;
+}
 
 let stopping = false;
 function requestStop(signal: string): void {
@@ -88,9 +118,18 @@ async function maybeReinvest(api: SpaceTradersApi): Promise<number> {
 
   // Route a fuel-free scout (or any ship) to the yard so live prices populate.
   const scout = fleet.find((s) => s.fuel.capacity === 0) ?? fleet[0]!;
-  const system = systemOf(CFG.reinvestYard);
-  if (scout.nav.waypointSymbol !== CFG.reinvestYard) {
-    await travelTo(api, scout, CFG.reinvestYard);
+  const system = systemOf(agent.headquarters);
+  const yardSymbol = discoverShipyard(
+    system,
+    CFG.reinvestYard,
+    coordsOf(scout.nav.waypointSymbol) ?? coordsOf(agent.headquarters),
+  );
+  if (!yardSymbol) {
+    log.info(`reinvest: no shipyard found in ${system}; skipping`);
+    return 0;
+  }
+  if (scout.nav.waypointSymbol !== yardSymbol) {
+    await travelTo(api, scout, yardSymbol);
   }
 
   let bought = 0;
@@ -98,7 +137,7 @@ async function maybeReinvest(api: SpaceTradersApi): Promise<number> {
     const budget = agent.credits - CFG.reserve;
     if (budget <= 0) break;
 
-    const yard = await scanShipyard(api, system, CFG.reinvestYard);
+    const yard = await scanShipyard(api, system, yardSymbol);
     const candidates = (yard.ships ?? []).map((s) => ({ type: s.type, price: s.purchasePrice }));
     const pick = bestReinvestShip(candidates, {
       budget,
@@ -111,10 +150,10 @@ async function maybeReinvest(api: SpaceTradersApi): Promise<number> {
     }
 
     log.info(
-      `reinvest: credits=${agent.credits} buying ${pick.type} @ ${pick.price} at ${CFG.reinvestYard} ` +
+      `reinvest: credits=${agent.credits} buying ${pick.type} @ ${pick.price} at ${yardSymbol} ` +
         `(fleet ${fleet.length + bought}/${CFG.maxShips}, roi=${(earnWeight(pick.type) / pick.price).toFixed(5)})`,
     );
-    const res = await purchaseShipAt(api, pick.type as ShipType, CFG.reinvestYard, {
+    const res = await purchaseShipAt(api, pick.type as ShipType, yardSymbol, {
       maxPrice: pick.price + CFG.reserve,
     });
     if (!res.ship) break;
@@ -139,9 +178,18 @@ async function maybeRepairFleet(api: SpaceTradersApi): Promise<number> {
   for (const ship of fleet) {
     if (stopping) break;
     const agent = await api.getMyAgent();
+    const yardSymbol = discoverShipyard(
+      systemOf(agent.headquarters),
+      CFG.repairYard,
+      coordsOf(ship.nav.waypointSymbol) ?? coordsOf(agent.headquarters),
+    );
+    if (!yardSymbol) {
+      log.info(`maintenance: no shipyard found for ${ship.symbol}; skipping`);
+      continue;
+    }
     const before = ship.frame.condition;
     const result = await maybeRepair(api, ship, {
-      shipyard: CFG.repairYard,
+      shipyard: yardSymbol,
       threshold: CFG.repairThreshold,
       maxSpend: Math.max(0, agent.credits - CFG.reserve),
     });
