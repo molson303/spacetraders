@@ -4,6 +4,7 @@ import type {
   ApiList,
   Contract,
   Extraction,
+  JumpGate,
   Market,
   Ship,
   ShipCargo,
@@ -12,6 +13,7 @@ import type {
   ShipType,
   Shipyard,
   Survey,
+  System,
   Waypoint,
   FlightMode,
 } from '../types/index.js';
@@ -45,6 +47,17 @@ export class SpaceTradersApi {
   }
 
   // ---------- Systems / Waypoints ----------
+  async getSystem(system: string): Promise<System> {
+    return (await this.http.get<ApiItem<System>>(`/systems/${system}`)).data;
+  }
+
+  /** Jump gate at a waypoint and the gates it connects to (cross-system). */
+  async getJumpGate(system: string, waypoint: string): Promise<JumpGate> {
+    return (
+      await this.http.get<ApiItem<JumpGate>>(`/systems/${system}/waypoints/${waypoint}/jump-gate`)
+    ).data;
+  }
+
   async getSystemWaypoints(
     system: string,
     query: PageQuery & { type?: string; traits?: string | string[] } = {},
@@ -179,6 +192,41 @@ export class SpaceTradersApi {
   async patchNav(symbol: string, flightMode: FlightMode): Promise<{ nav: ShipNav }> {
     return (
       await this.http.patch<ApiItem<{ nav: ShipNav }>>(`/my/ships/${symbol}/nav`, { flightMode })
+    ).data;
+  }
+
+  // ---------- Fleet: cross-system travel ----------
+  /**
+   * Jump to a connected jump gate in another system. The target is the
+   * destination gate's WAYPOINT symbol (from getJumpGate connections). Jumping
+   * is instantaneous but triggers a cooldown and auto-buys one antimatter at the
+   * gate's market rate (credits deducted -> agent is returned).
+   */
+  async jumpShip(
+    symbol: string,
+    waypointSymbol: string,
+  ): Promise<{ nav: ShipNav; cooldown: ShipCooldown; agent?: Agent; transaction?: MarketTxn }> {
+    return (
+      await this.http.post<
+        ApiItem<{ nav: ShipNav; cooldown: ShipCooldown; agent?: Agent; transaction?: MarketTxn }>
+      >(`/my/ships/${symbol}/jump`, { waypointSymbol })
+    ).data;
+  }
+
+  /**
+   * Warp to a waypoint in another system. Requires a warp drive module and
+   * consumes fuel (no jump gate needed). Currently no fleet ship has a warp
+   * drive, but this is here for when one is acquired.
+   */
+  async warpShip(
+    symbol: string,
+    waypointSymbol: string,
+  ): Promise<{ nav: ShipNav; fuel: Ship['fuel'] }> {
+    return (
+      await this.http.post<ApiItem<{ nav: ShipNav; fuel: Ship['fuel'] }>>(
+        `/my/ships/${symbol}/warp`,
+        { waypointSymbol },
+      )
     ).data;
   }
 

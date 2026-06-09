@@ -220,3 +220,30 @@ export type ShipType =
   | 'SHIP_ORE_HOUND'
   | 'SHIP_REFINING_FREIGHTER'
   | 'SHIP_SURVEYOR';
+
+// ---------- Systems / Jump gates (cross-system travel) ----------
+
+export interface SystemWaypoint {
+  symbol: string;
+  type: string;
+  x: number;
+  y: number;
+  orbitals?: WaypointOrbital[];
+  orbits?: string;
+}
+
+export interface System {
+  symbol: string;
+  sectorSymbol: string;
+  type: string;
+  x: number;
+  y: number;
+  waypoints: SystemWaypoint[];
+  factions?: { symbol: string }[];
+}
+
+/** A jump gate and the waypoint symbols of the gates it connects to. */
+export interface JumpGate {
+  symbol: string;
+  connections: string[];
+}
