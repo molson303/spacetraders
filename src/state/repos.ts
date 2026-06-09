@@ -1,10 +1,12 @@
 import { getDb } from './db.js';
 import type {
   Contract,
+  JumpGate,
   Market,
   MarketTradeGood,
   Ship,
   Shipyard,
+  System,
   Waypoint,
 } from '../types/index.js';
 
@@ -471,4 +473,73 @@ export function findUnpricedMarkets(system: string): WaypointRow[] {
     traits: string;
   }[];
   return rows.map(parseWaypointRow);
+}
+
+// ---------- Systems / Jump gates (cross-system travel) ----------
+
+export interface SystemRow {
+  symbol: string;
+  sector: string | null;
+  type: string | null;
+  x: number;
+  y: number;
+}
+
+export function upsertSystem(sys: System): void {
+  getDb()
+    .prepare(
+      `INSERT INTO systems (symbol, sector, type, x, y, raw, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+       ON CONFLICT(symbol) DO UPDATE SET
+         sector=excluded.sector, type=excluded.type, x=excluded.x, y=excluded.y,
+         raw=excluded.raw, updated_at=datetime('now')`,
+    )
+    .run(sys.symbol, sys.sectorSymbol, sys.type, sys.x, sys.y, JSON.stringify(sys));
+}
+
+export function getSystemRow(symbol: string): SystemRow | undefined {
+  return getDb()
+    .prepare('SELECT symbol, sector, type, x, y FROM systems WHERE symbol = ?')
+    .get(symbol) as SystemRow | undefined;
+}
+
+export interface JumpGateRow {
+  symbol: string;
+  system: string;
+  connections: string[];
+}
+
+function parseJumpGateRow(r: {
+  symbol: string;
+  system: string;
+  connections: string;
+}): JumpGateRow {
+  return { ...r, connections: JSON.parse(r.connections) as string[] };
+}
+
+export function upsertJumpGate(system: string, gate: JumpGate): void {
+  getDb()
+    .prepare(
+      `INSERT INTO jump_gates (symbol, system, connections, last_scanned)
+       VALUES (?, ?, ?, datetime('now'))
+       ON CONFLICT(symbol) DO UPDATE SET
+         system=excluded.system, connections=excluded.connections, last_scanned=datetime('now')`,
+    )
+    .run(gate.symbol, system, JSON.stringify(gate.connections ?? []));
+}
+
+/** A specific jump gate waypoint's connections, if known. */
+export function getJumpGateRow(symbol: string): JumpGateRow | undefined {
+  const r = getDb()
+    .prepare('SELECT symbol, system, connections FROM jump_gates WHERE symbol = ?')
+    .get(symbol) as { symbol: string; system: string; connections: string } | undefined;
+  return r ? parseJumpGateRow(r) : undefined;
+}
+
+/** The jump gate(s) recorded for a system (usually one). */
+export function findJumpGatesBySystem(system: string): JumpGateRow[] {
+  const rows = getDb()
+    .prepare('SELECT symbol, system, connections FROM jump_gates WHERE system = ?')
+    .all(system) as { symbol: string; system: string; connections: string }[];
+  return rows.map(parseJumpGateRow);
 }

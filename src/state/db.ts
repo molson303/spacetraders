@@ -133,6 +133,27 @@ const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_tx_time ON transactions(observed_at);
   CREATE INDEX IF NOT EXISTS idx_tx_ship ON transactions(ship);
   `,
+  // v2 — cross-system travel: systems + jump gate topology
+  `
+  CREATE TABLE IF NOT EXISTS systems (
+    symbol     TEXT PRIMARY KEY,
+    sector     TEXT,
+    type       TEXT,
+    x          INTEGER NOT NULL,
+    y          INTEGER NOT NULL,
+    raw        TEXT,                          -- full json (incl. waypoints)
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  -- A jump gate waypoint and the gate waypoints it connects to (other systems).
+  CREATE TABLE IF NOT EXISTS jump_gates (
+    symbol       TEXT PRIMARY KEY,            -- gate waypoint symbol
+    system       TEXT NOT NULL,
+    connections  TEXT NOT NULL DEFAULT '[]',  -- json array of connected gate waypoint symbols
+    last_scanned TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_jump_gates_system ON jump_gates(system);
+  `,
 ];
 
 let dbInstance: DatabaseSync | null = null;

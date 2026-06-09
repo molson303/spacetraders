@@ -2,10 +2,14 @@ import type { SpaceTradersApi } from '../client/api.js';
 import { createLogger } from '../util/logger.js';
 import { kvGet, kvSet } from './kv.js';
 import {
+  findJumpGatesBySystem,
+  findWaypointsByType,
   upsertContract,
+  upsertJumpGate,
   upsertMarket,
   upsertShip,
   upsertShipyard,
+  upsertSystem,
   upsertWaypoint,
 } from './repos.js';
 
@@ -127,4 +131,40 @@ export function systemOf(waypoint: string): string {
   // Waypoint symbols look like X1-A20-A1 -> system is X1-A20.
   const parts = waypoint.split('-');
   return parts.slice(0, 2).join('-');
+}
+
+/** Read & persist a system's summary record (symbol, coords, type, sector). */
+export async function hydrateSystem(api: SpaceTradersApi, system: string) {
+  const sys = await api.getSystem(system);
+  upsertSystem(sys);
+  return sys;
+}
+
+/**
+ * Discover and persist the jump-gate topology for a system: find its JUMP_GATE
+ * waypoint(s) and record the gate waypoints each one connects to (the seeds for
+ * cross-system routing). Cached so repeat rounds skip unless forced.
+ */
+export async function hydrateJumpGates(
+  api: SpaceTradersApi,
+  system: string,
+  force = false,
+) {
+  const cacheKey = `jump_gates_scanned:${system}`;
+  if (!force && kvGet<boolean>(cacheKey)) {
+    log.info(`jump gates for ${system} already scanned (cached)`);
+    return findJumpGatesBySystem(system);
+  }
+  const gates = findWaypointsByType(system, 'JUMP_GATE');
+  for (const g of gates) {
+    try {
+      const jg = await api.getJumpGate(system, g.symbol);
+      upsertJumpGate(system, jg);
+      log.info(`jump gate ${g.symbol} -> [${(jg.connections ?? []).join(', ')}]`);
+    } catch (err) {
+      log.debug(`jump gate scan failed for ${g.symbol}: ${(err as Error).message}`);
+    }
+  }
+  kvSet(cacheKey, true);
+  return findJumpGatesBySystem(system);
 }
