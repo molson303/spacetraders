@@ -95,6 +95,29 @@ export function depthCappedBuyUnits(
   return Math.min(freeCargo, cap);
 }
 
+export interface HoldItem {
+  symbol: string;
+  units: number;
+}
+
+/**
+ * Cargo that should be liquidated before a hauler starts fresh arbitrage: every
+ * good in the hold with units > 0, optionally excluding `keep` (the good the
+ * ship is actively routing and will sell on its own). Ordered by units
+ * descending so the biggest frozen-capital sinks are freed first.
+ *
+ * Why: ships persist their cargo across process restarts. A hauler that ended a
+ * prior run holding unsold goods starts the next run with a full hold that
+ * doesn't match its newly assigned good — every buy silently no-ops (freeSpace
+ * is 0) and the ship churns "bought nothing" forever while its capital stays
+ * frozen in stale cargo. Draining the hold first unblocks it.
+ */
+export function strandedGoods<T extends HoldItem>(inventory: T[], keep?: string): T[] {
+  return inventory
+    .filter((i) => i.units > 0 && i.symbol !== keep)
+    .sort((a, b) => b.units - a.units);
+}
+
 export interface AltSellMarket {
   waypoint: string;
   sellPrice: number;

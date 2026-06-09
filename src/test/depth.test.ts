@@ -8,6 +8,7 @@ import {
   keepBuying,
   bestSellMarket,
   depthCappedBuyUnits,
+  strandedGoods,
 } from '../util/depth.js';
 import type { PriceRow } from '../state/repos.js';
 
@@ -104,4 +105,32 @@ test('depthCappedBuyUnits clamps multiple to at least one step', () => {
 test('depthCappedBuyUnits returns 0 for a full hold', () => {
   assert.equal(depthCappedBuyUnits(0, 5, 3), 0);
   assert.equal(depthCappedBuyUnits(-2, 5, 3), 0);
+});
+
+test('strandedGoods returns held goods ordered by units descending', () => {
+  const inv = [
+    { symbol: 'IRON', units: 10 },
+    { symbol: 'GOLD', units: 0 },
+    { symbol: 'SILVER', units: 80 },
+    { symbol: 'COPPER', units: 25 },
+  ];
+  assert.deepEqual(strandedGoods(inv), [
+    { symbol: 'SILVER', units: 80 },
+    { symbol: 'COPPER', units: 25 },
+    { symbol: 'IRON', units: 10 },
+  ]);
+});
+
+test('strandedGoods excludes the kept good and zero-unit entries', () => {
+  const inv = [
+    { symbol: 'FABRICS', units: 40 },
+    { symbol: 'SILVER', units: 80 },
+    { symbol: 'GOLD', units: 0 },
+  ];
+  assert.deepEqual(strandedGoods(inv, 'FABRICS'), [{ symbol: 'SILVER', units: 80 }]);
+});
+
+test('strandedGoods is empty for an empty hold', () => {
+  assert.deepEqual(strandedGoods([]), []);
+  assert.deepEqual(strandedGoods([{ symbol: 'GOLD', units: 0 }]), []);
 });

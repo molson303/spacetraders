@@ -8,7 +8,14 @@ import {
 } from '../state/repos.js';
 import { scanMarket } from '../state/world.js';
 import { distance, travelTo } from '../util/nav.js';
-import { bestSellMarket, buyCeiling, depthCappedBuyUnits, sellFloor, DEFAULT_SELL_DEPTH_MULTIPLE } from '../util/depth.js';
+import {
+  bestSellMarket,
+  buyCeiling,
+  depthCappedBuyUnits,
+  sellFloor,
+  strandedGoods,
+  DEFAULT_SELL_DEPTH_MULTIPLE,
+} from '../util/depth.js';
 import { createLogger } from '../util/logger.js';
 import { buyGoodHere } from './buyer.js';
 import { cargoUnitsOf, sellCargoHere } from './trade.js';
@@ -65,6 +72,45 @@ async function scanHere(api: SpaceTradersApi, ship: Ship): Promise<void> {
   } catch (err) {
     log.debug(`${ship.symbol} scan ${ship.nav.waypointSymbol} failed: ${(err as Error).message}`);
   }
+}
+
+/**
+ * Liquidate any cargo the ship is already carrying before it starts a fresh
+ * arbitrage run. Ships keep their hold across process restarts, so a hauler can
+ * begin a round full of stale goods that don't match its assigned route — every
+ * buy then silently no-ops (no free space) and the ship churns forever with its
+ * capital frozen in cargo. We first try selling at the current market (free, no
+ * travel), then route any remainder to the best known market for each good.
+ * Goods with no known market are left in place. A ship that starts with an empty
+ * hold (the healthy case) is a no-op.
+ */
+async function drainStrandedCargo(
+  api: SpaceTradersApi,
+  ship: Ship,
+  system: string,
+): Promise<Ship> {
+  if (strandedGoods(ship.cargo.inventory).length === 0) return ship;
+
+  // Sell whatever the current market will buy first — no travel cost.
+  const here = await sellCargoHere(api, ship);
+  ship = here.ship;
+
+  for (const item of strandedGoods(ship.cargo.inventory)) {
+    const alt = bestSellMarket(getLatestPricesForGood(system, item.symbol), new Set(), 1);
+    if (!alt) {
+      log.warn(
+        `${ship.symbol} stranded ${item.units} ${item.symbol}: no known market; holding`,
+      );
+      continue;
+    }
+    log.info(
+      `${ship.symbol} liquidating stranded ${item.units} ${item.symbol} -> ${alt.waypoint} (sell~${alt.sellPrice})`,
+    );
+    ship = await travelTo(api, ship, alt.waypoint);
+    const sold = await sellCargoHere(api, ship);
+    ship = sold.ship;
+  }
+  return ship;
 }
 
 /** Move to the nearest marketplace we have no prices for, and scan it. */
@@ -192,6 +238,7 @@ export async function runTrader(
     log.info(`${ship.symbol} assigned good ${assignedGood}`);
   }
   await scanHere(api, ship);
+  ship = await drainStrandedCargo(api, ship, system);
 
   while (cycles < maxCycles) {
     const route = selectRoute(system, minProfit, assignedGood, avoidGoods);
