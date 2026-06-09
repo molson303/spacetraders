@@ -56,6 +56,7 @@ const CFG = {
   restMs: Number(process.env.REST_MS ?? 5000),
   maxRounds: Number(process.env.MAX_ROUNDS ?? 0),
   miners: Number(process.env.MINERS ?? 0),
+  crossAntimatterCost: Number(process.env.CROSS_ANTIMATTER_COST ?? 0),
   reinvest: (process.env.REINVEST ?? '1') === '1',
   reserve: Number(process.env.RESERVE ?? 75000),
   maxShips: Number(process.env.MAX_SHIPS ?? 8),
@@ -226,12 +227,14 @@ async function main(): Promise<void> {
         scanLimit: CFG.scanLimit,
         scanBudgetMs: CFG.scanBudgetMs,
         miners: CFG.miners,
+        crossAntimatterCost: CFG.crossAntimatterCost,
       });
       const dt = Math.round((Date.now() - t0) / 1000);
       log.info(
         `===== round ${round} done in ${dt}s | credits=${r.endCredits} ` +
           `(round Δ${r.endCredits - r.startCredits}, total Δ${r.endCredits - baseline}) ` +
           `contracts=${r.contractsCompleted} traderProfit=${r.traderProfit} ` +
+          `remoteProfit=${r.remoteProfit} scouted=${r.scoutedSystems} ` +
           `minerEarnings=${r.minerEarnings} scanned=${r.scannedMarkets} =====`,
       );
     } catch (err) {

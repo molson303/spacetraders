@@ -14,11 +14,13 @@
  *   TRADE_CYCLES   arbitrage cycles each trader runs (default 5)
  *   MIN_PROFIT     minimum per-unit spread a trader will act on (default 20)
  *   SCAN_LIMIT     markets each scanner visits (default 30)
+ *   CROSS_ANTIMATTER_COST  est. credits/jump used to net cross-system routes (default 0)
  */
 import { SpaceTradersApi } from './client/api.js';
 import { closeDb } from './state/db.js';
 import {
   hydrateContracts,
+  hydrateJumpGates,
   hydrateMarketStructures,
   hydrateShips,
   hydrateSystemWaypoints,
@@ -27,9 +29,19 @@ import {
 import { runContractPipeline } from './behaviors/contractPipeline.js';
 import { runTrader } from './behaviors/trader.js';
 import { runScanner } from './behaviors/scanner.js';
+import { runRemoteScout } from './behaviors/remoteScout.js';
+import { runRemoteTrade } from './behaviors/remoteTrader.js';
 import { canMine, runMiner } from './behaviors/miningTrader.js';
-import { findArbitrageRoutes, getWaypointRow } from './state/repos.js';
-import { assignRoutes, routeCreditsPerSecond } from './util/routes.js';
+import {
+  findArbitrageRoutes,
+  findCrossSystemArbitrageRoutes,
+  findJumpGatesBySystem,
+  getJumpGateRow,
+  getWaypointRow,
+} from './state/repos.js';
+import { assignRoutes, routeCreditsPerSecond, routeScore } from './util/routes.js';
+import { findJumpPath } from './util/jumpPath.js';
+import { rankCrossRoutes, assignCrossRoutes, type CrossSystemRoute } from './util/crossRoutes.js';
 import { distance } from './util/nav.js';
 import { log } from './util/logger.js';
 import type { Ship } from './types/index.js';
@@ -43,6 +55,8 @@ export interface FleetRoundOptions {
   scanBudgetMs?: number;
   /** How many mining-capable ships to run as dedicated miners (default 0). */
   miners?: number;
+  /** Estimated antimatter credits spent per jump, used to net cross-system routes (default 0). */
+  crossAntimatterCost?: number;
 }
 
 export interface FleetRoundResult {
@@ -54,6 +68,8 @@ export interface FleetRoundResult {
   traderProfit: number;
   scannedMarkets: number;
   minerEarnings: number;
+  remoteProfit: number;
+  scoutedSystems: number;
 }
 
 /** A ship that can haul cargo and move under its own fuel. */
@@ -77,6 +93,7 @@ export async function runFleetRound(
   const scanLimit = opts.scanLimit ?? 30;
   const scanBudgetMs = opts.scanBudgetMs ?? 180000;
   const minerCount = Math.max(0, opts.miners ?? 0);
+  const crossAntimatterCost = Math.max(0, opts.crossAntimatterCost ?? 0);
 
   const agent = await api.getMyAgent();
   const system = systemOf(agent.headquarters);
@@ -84,6 +101,7 @@ export async function runFleetRound(
   const ships = await hydrateShips(api);
   await hydrateSystemWaypoints(api, system);
   await hydrateMarketStructures(api, system);
+  await hydrateJumpGates(api, system);
   await hydrateContracts(api);
 
   const haulers = ships.filter(isHauler);
@@ -102,6 +120,8 @@ export async function runFleetRound(
     traderProfit: 0,
     scannedMarkets: 0,
     minerEarnings: 0,
+    remoteProfit: 0,
+    scoutedSystems: 0,
   };
 
   if (haulers.length === 0) {
@@ -143,15 +163,57 @@ export async function runFleetRound(
     const b = getWaypointRow(to);
     return a && b ? distance(a, b) : 0;
   };
-  const assignments = assignRoutes(candidates, traders.length, {
+
+  // Cross-system arbitrage takes priority for any freighter when a remote route
+  // out-earns the best local hop (net of round-trip jump/antimatter cost). Hops
+  // are counted over the hydrated gate graph; only systems whose gate topology
+  // is known are reachable. Remote routes are only known once the scout has
+  // captured prices in a neighbor system, so early rounds naturally fall back to
+  // local trading until the price map fills in.
+  const gateNeighbors = (g: string): string[] => getJumpGateRow(g)?.connections ?? [];
+  const hopsBetween = (from: string, to: string): number | undefined => {
+    const gate = findJumpGatesBySystem(from)[0]?.symbol;
+    if (!gate) return undefined;
+    const path = findJumpPath(gate, to, gateNeighbors, systemOf);
+    return path === undefined ? undefined : path.length;
+  };
+  const bestLocalScore = candidates.length
+    ? Math.max(...candidates.map((r) => routeScore(r, holdSize)))
+    : 0;
+  const rankedCross = rankCrossRoutes(
+    findCrossSystemArbitrageRoutes(minProfit) as CrossSystemRoute[],
+    hopsBetween,
+    { holdSize, antimatterCost: crossAntimatterCost },
+  ).filter((r) => r.netProfit > bestLocalScore);
+  const crossAssigned = assignCrossRoutes(rankedCross, traders.length);
+
+  // Freighters that drew a remote route haul cross-system; the rest trade local.
+  const remoteTraders = traders.slice(0, crossAssigned.length);
+  const localTraders = traders.slice(crossAssigned.length);
+  const crossGoods = crossAssigned.map((r) => r.route.good);
+  if (crossAssigned.length > 0) {
+    log.info(
+      `cross-system assignments: ${crossAssigned
+        .map((r, i) => `${remoteTraders[i]!.symbol}->${r.route.good}([${r.route.buySystem}]${r.route.buyAt}->[${r.route.sellSystem}]${r.route.sellAt} net~${r.netProfit}/${r.hops}h)`)
+        .join(', ')}`,
+    );
+  }
+
+  // Assign each LOCAL trader a distinct, non-overlapping route up front so
+  // concurrent traders don't pile onto the same good and collapse its spread.
+  // Ranking is by credits-per-second (profit-per-trip / round-trip travel time)
+  // so short, fat-volume hops that turn the hold over quickly are preferred.
+  const assignments = assignRoutes(candidates, localTraders.length, {
     holdSize,
     score: (r) => routeCreditsPerSecond(r, distanceOf, { holdSize }),
   });
   const assignedGoods = assignments.map((r) => r.good);
+  // Goods the idle-contractor fallback should also steer clear of.
+  const claimedGoods = [...assignedGoods, ...crossGoods];
   if (assignedGoods.length > 0) {
     log.info(
       `route assignments: ${assignments
-        .map((r, i) => `${traders[i]!.symbol}->${r.good}(${r.buyAt}->${r.sellAt} ~${r.profitPerUnit}/u)`)
+        .map((r, i) => `${localTraders[i]!.symbol}->${r.good}(${r.buyAt}->${r.sellAt} ~${r.profitPerUnit}/u)`)
         .join(', ')}`,
     );
   }
@@ -180,7 +242,7 @@ export async function runFleetRound(
             const r = await runTrader(api, fresh, system, {
               cycles: tradeCycles,
               minProfit,
-              avoidGoods: assignedGoods,
+              avoidGoods: claimedGoods,
             });
             result.traderProfit += r.profit;
             log.info(
@@ -206,12 +268,21 @@ export async function runFleetRound(
   const earnerJobs: Promise<unknown>[] = [
     ...(contractorJob ? [contractorJob] : []),
     ...minerJobs,
-    ...traders.map((ship, i) =>
+    ...remoteTraders.map((ship, i) =>
+      runRemoteTrade(api, ship, crossAssigned[i]!.route, minProfit).then(
+        (r) => {
+          result.remoteProfit += r.profit;
+          log.info(`${ship.symbol} remote-trader done: profit=${r.profit}`);
+        },
+        (e) => log.error(`${ship.symbol} remote-trader errored: ${e}`),
+      ),
+    ),
+    ...localTraders.map((ship, i) =>
       runTrader(api, ship, system, {
         cycles: tradeCycles,
         minProfit,
         assignedGood: assignedGoods[i],
-        avoidGoods: assignedGoods.filter((_, j) => j !== i),
+        avoidGoods: [...assignedGoods.filter((_, j) => j !== i), ...crossGoods],
       }).then(
         (r) => {
           result.traderProfit += r.profit;
@@ -222,18 +293,41 @@ export async function runFleetRound(
     ),
   ];
 
-  const scannerJobs: Promise<unknown>[] = scouts.map((ship) =>
-    runScanner(api, ship, system, {
-      limit: scanLimit,
-      budgetMs: scanBudgetMs,
-      shouldStop: () => earnersDone,
-    }).then(
-      (n) => {
+  // Scouts ride the gates into unscanned neighbor systems to capture remote
+  // prices (the prerequisite for cross-system arbitrage). The first scout does
+  // the remote run; when there are no unscanned neighbors it returns quickly and
+  // falls back to refreshing the local price map. Extra scouts stay local.
+  const scannerJobs: Promise<unknown>[] = scouts.map((ship, idx) =>
+    (async () => {
+      try {
+        if (idx === 0) {
+          const scouted = await runRemoteScout(api, ship, system, {
+            budgetMs: scanBudgetMs,
+            shouldStop: () => earnersDone,
+          });
+          result.scoutedSystems += scouted.scannedSystems;
+          if (scouted.scannedSystems > 0) return;
+          // Nothing new remote -> keep local prices fresh with the time left.
+          const fresh = await api.getShip(ship.symbol);
+          const n = await runScanner(api, fresh, system, {
+            limit: scanLimit,
+            budgetMs: scanBudgetMs,
+            shouldStop: () => earnersDone,
+          });
+          result.scannedMarkets += n;
+          return;
+        }
+        const n = await runScanner(api, ship, system, {
+          limit: scanLimit,
+          budgetMs: scanBudgetMs,
+          shouldStop: () => earnersDone,
+        });
         result.scannedMarkets += n;
         log.info(`${ship.symbol} scanner done: ${n} market(s)`);
-      },
-      (e) => log.error(`${ship.symbol} scanner errored: ${e}`),
-    ),
+      } catch (e) {
+        log.error(`${ship.symbol} scout errored: ${e}`);
+      }
+    })(),
   );
 
   // Wait for the earners; that defines the round's outcome and credit delta.
@@ -257,10 +351,12 @@ async function main(): Promise<void> {
     minProfit: Number(process.env.MIN_PROFIT ?? 20),
     scanLimit: Number(process.env.SCAN_LIMIT ?? 30),
     miners: Number(process.env.MINERS ?? 0),
+    crossAntimatterCost: Number(process.env.CROSS_ANTIMATTER_COST ?? 0),
   });
   log.info(
     `orchestrator done | credits=${r.endCredits} (Δ${r.endCredits - r.startCredits}) ` +
-      `contracts=${r.contractsCompleted} traderProfit=${r.traderProfit} minerEarnings=${r.minerEarnings}`,
+      `contracts=${r.contractsCompleted} traderProfit=${r.traderProfit} ` +
+      `remoteProfit=${r.remoteProfit} scouted=${r.scoutedSystems} minerEarnings=${r.minerEarnings}`,
   );
   closeDb();
 }
