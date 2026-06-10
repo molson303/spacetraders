@@ -30,6 +30,18 @@ export function earnWeight(type: string): number {
   return EARN_WEIGHT[type] ?? 40;
 }
 
+/**
+ * How many more income ships are worth buying given the distinct profitable
+ * routes available and the current earner count. Buying past the number of
+ * distinct routes just puts two ships on the same good, collapsing its spread
+ * (we measured a fresh earner net only ~6.8k on an already-worked SHIP_PARTS
+ * lane). Headroom is the surplus of routes over earners, clamped at zero so a
+ * route-starved fleet stops growing rather than churning credits.
+ */
+export function reinvestEarnerHeadroom(distinctRoutes: number, earnerCount: number): number {
+  return Math.max(0, distinctRoutes - earnerCount);
+}
+
 export interface BestReinvestOptions {
   /** Credits available to spend right now (already net of any reserve). */
   budget: number;

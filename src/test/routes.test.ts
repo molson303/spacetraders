@@ -4,6 +4,7 @@ import {
   routeScore,
   assignRoutes,
   bestRouteFor,
+  countDistinctRoutes,
   tripSeconds,
   routeCreditsPerSecond,
   selectFlightMode,
@@ -201,4 +202,27 @@ test('bestRouteFor skips avoided goods, falling back only when all are avoided',
   assert.equal(bestRouteFor([a, b], { holdSize: 40, avoid: ['A'] })?.good, 'B');
   // Every good avoided -> last resort returns the top-scored route.
   assert.equal(bestRouteFor([a, b], { holdSize: 40, avoid: ['A', 'B'] })?.good, 'A');
+});
+
+test('countDistinctRoutes counts non-overlapping good+sell routes', () => {
+  const routes = [
+    route({ good: 'A', sellAt: 'S1' }),
+    route({ good: 'B', sellAt: 'S2' }),
+    route({ good: 'C', sellAt: 'S3' }),
+  ];
+  assert.equal(countDistinctRoutes(routes), 3);
+});
+
+test('countDistinctRoutes dedupes repeated goods and shared sell waypoints', () => {
+  const routes = [
+    route({ good: 'A', sellAt: 'S1' }),
+    route({ good: 'A', sellAt: 'S2' }), // same good as first -> skipped
+    route({ good: 'B', sellAt: 'S1' }), // shares sell waypoint with first -> skipped
+    route({ good: 'C', sellAt: 'S3' }), // distinct -> counted
+  ];
+  assert.equal(countDistinctRoutes(routes), 2);
+});
+
+test('countDistinctRoutes is zero for no routes', () => {
+  assert.equal(countDistinctRoutes([]), 0);
 });

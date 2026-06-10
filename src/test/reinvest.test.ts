@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { bestReinvestShip, earnWeight, type ReinvestCandidate } from '../util/reinvest.js';
+import { bestReinvestShip, earnWeight, reinvestEarnerHeadroom, type ReinvestCandidate } from '../util/reinvest.js';
 
 const YARD: ReinvestCandidate[] = [
   { type: 'SHIP_PROBE', price: 28_000 },
@@ -60,4 +60,16 @@ test('bestReinvestShip honours an injected earnRate', () => {
 
 test('bestReinvestShip returns undefined for an empty yard', () => {
   assert.equal(bestReinvestShip([], { budget: 1_000_000 }), undefined);
+});
+
+test('reinvestEarnerHeadroom is the surplus of routes over earners', () => {
+  assert.equal(reinvestEarnerHeadroom(8, 5), 3);
+  assert.equal(reinvestEarnerHeadroom(6, 6), 0);
+});
+
+test('reinvestEarnerHeadroom clamps at zero when routes are scarce', () => {
+  // 8 earners but only 6 distinct routes -> no room to add ships that would
+  // just double up on a good and collapse its spread.
+  assert.equal(reinvestEarnerHeadroom(6, 8), 0);
+  assert.equal(reinvestEarnerHeadroom(0, 3), 0);
 });

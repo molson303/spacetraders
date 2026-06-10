@@ -47,6 +47,7 @@ import { purchaseShipAt } from './behaviors/fleet.js';
 import { maybeRepair } from './behaviors/maintenance.js';
 import { scanShipyard, systemOf } from './state/world.js';
 import {
+  findArbitrageRoutes,
   findJumpGatesBySystem,
   findShipyardsSellingShipType,
   findWaypointsByTrait,
@@ -56,7 +57,8 @@ import {
 } from './state/repos.js';
 import { kvGet, kvSet } from './state/kv.js';
 import { travelTo } from './util/nav.js';
-import { bestReinvestShip, earnWeight } from './util/reinvest.js';
+import { bestReinvestShip, earnWeight, reinvestEarnerHeadroom } from './util/reinvest.js';
+import { countDistinctRoutes } from './util/routes.js';
 import {
   planProbeStations,
   probesToProvision,
@@ -180,6 +182,24 @@ async function maybeReinvest(api: SpaceTradersApi): Promise<number> {
   // Cheap pre-check: don't route a scout if we can't plausibly afford a ship.
   if (agent.credits - CFG.reserve < CFG.shipCostEst) return 0;
 
+  // Route-diversity cap: never grow earners past the number of distinct
+  // profitable routes in-system. Beyond that, a new hauler can only double up on
+  // a good already being traded and collapse its spread, so the marginal ship
+  // earns almost nothing. We still honor MAX_SHIPS as the hard ceiling and never
+  // shrink below the current earner count (we don't sell ships). Cheap pre-check
+  // so we skip the scout trip entirely when the fleet already covers the routes.
+  const system = systemOf(agent.headquarters);
+  const distinctRoutes = countDistinctRoutes(findArbitrageRoutes(system, CFG.minProfit, 30));
+  const headroom = reinvestEarnerHeadroom(distinctRoutes, earnerCount);
+  const shipTarget = Math.min(CFG.maxShips, earnerCount + headroom);
+  if (shipTarget <= earnerCount) {
+    log.info(
+      `reinvest: ${earnerCount} earners already cover ${distinctRoutes} distinct route(s); ` +
+        `holding (maxShips=${CFG.maxShips})`,
+    );
+    return 0;
+  }
+
   // Route a flex probe (fuel-free, not holding a station) to the yard so live
   // prices populate, falling back to any fuel-free ship, then any ship.
   const stationedShips = new Set(
@@ -189,7 +209,6 @@ async function maybeReinvest(api: SpaceTradersApi): Promise<number> {
     fleet.find((s) => s.fuel.capacity === 0 && !stationedShips.has(s.symbol)) ??
     fleet.find((s) => s.fuel.capacity === 0) ??
     fleet[0]!;
-  const system = systemOf(agent.headquarters);
   const yardSymbol = discoverShipyard(
     system,
     CFG.reinvestYard,
@@ -204,7 +223,7 @@ async function maybeReinvest(api: SpaceTradersApi): Promise<number> {
   }
 
   let bought = 0;
-  while (earnerCount + bought < CFG.maxShips) {
+  while (earnerCount + bought < shipTarget) {
     const budget = agent.credits - CFG.reserve;
     if (budget <= 0) break;
 
@@ -222,7 +241,7 @@ async function maybeReinvest(api: SpaceTradersApi): Promise<number> {
 
     log.info(
       `reinvest: credits=${agent.credits} buying ${pick.type} @ ${pick.price} at ${yardSymbol} ` +
-        `(earners ${earnerCount + bought}/${CFG.maxShips}, roi=${(earnWeight(pick.type) / pick.price).toFixed(5)})`,
+        `(earners ${earnerCount + bought}/${shipTarget}, routes=${distinctRoutes}, roi=${(earnWeight(pick.type) / pick.price).toFixed(5)})`,
     );
     const res = await purchaseShipAt(api, pick.type as ShipType, yardSymbol, {
       maxPrice: pick.price + CFG.reserve,

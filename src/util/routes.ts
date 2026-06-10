@@ -153,10 +153,29 @@ export function assignRoutes(
   const sells = new Set<string>();
   for (const r of ranked) {
     if (chosen.length >= count) break;
-    if (goods.has(r.good) || sells.has(r.sellAt)) continue;
+     if (goods.has(r.good) || sells.has(r.sellAt)) continue;
     goods.add(r.good);
     sells.add(r.sellAt);
     chosen.push(r);
   }
   return chosen;
+}
+
+/**
+ * Count the distinct profitable routes available — distinct by both good and
+ * sell waypoint, matching {@link assignRoutes}' non-overlap rule. This is the
+ * natural ceiling on how many traders can work concurrently without colliding:
+ * beyond it, extra ships pile onto goods already being traded and collapse the
+ * spread (depth-capped saturation). Order-sensitive only in the same way
+ * {@link assignRoutes} is, so pass routes in the same ranked order.
+ */
+export function countDistinctRoutes(routes: ArbitrageRoute[]): number {
+  const goods = new Set<string>();
+  const sells = new Set<string>();
+  for (const r of routes) {
+    if (goods.has(r.good) || sells.has(r.sellAt)) continue;
+    goods.add(r.good);
+    sells.add(r.sellAt);
+  }
+  return goods.size;
 }
