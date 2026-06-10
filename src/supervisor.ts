@@ -15,6 +15,9 @@
  *                    round; earners (contractor/traders) define round end
  *                    and reinvest fires right after (default 180000 = 3 min)
  *   REST_MS          pause between rounds (default 5000)
+ *   ROUND_BUDGET_MS  wall-clock cap for a round's earners; traders finish their
+ *                    in-flight cycle but start no new one past it, so one slow
+ *                    ship can't stall the fleet (default 1500000 = 25 min)
  *   MAX_ROUNDS       stop after N rounds (default 0 = unlimited)
  *   MINERS           run this many mining-capable ships as dedicated miners
  *                    each round (default 0 = no mining, unchanged behavior)
@@ -75,6 +78,7 @@ const CFG = {
   maxRounds: Number(process.env.MAX_ROUNDS ?? 0),
   miners: Number(process.env.MINERS ?? 0),
   crossAntimatterCost: Number(process.env.CROSS_ANTIMATTER_COST ?? 0),
+  roundBudgetMs: Number(process.env.ROUND_BUDGET_MS ?? 1_500_000),
   reinvest: (process.env.REINVEST ?? '1') === '1',
   reserve: Number(process.env.RESERVE ?? 75000),
   maxShips: Number(process.env.MAX_SHIPS ?? 8),
@@ -364,7 +368,8 @@ async function main(): Promise<void> {
   const startAgent = await api.getMyAgent();
   log.info(
     `supervisor start | credits=${startAgent.credits} reinvest=${CFG.reinvest} ` +
-      `reserve=${CFG.reserve} maxShips=${CFG.maxShips} maxRounds=${CFG.maxRounds || '∞'}`,
+      `reserve=${CFG.reserve} maxShips=${CFG.maxShips} maxRounds=${CFG.maxRounds || '∞'} ` +
+      `roundBudget=${CFG.roundBudgetMs ? Math.round(CFG.roundBudgetMs / 1000) + 's' : '∞'}`,
   );
 
   let round = 0;
@@ -383,6 +388,7 @@ async function main(): Promise<void> {
         scanBudgetMs: CFG.scanBudgetMs,
         miners: CFG.miners,
         crossAntimatterCost: CFG.crossAntimatterCost,
+        roundBudgetMs: CFG.roundBudgetMs,
       });
       const dt = Math.round((Date.now() - t0) / 1000);
       log.info(

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   routeScore,
   assignRoutes,
+  bestRouteFor,
   tripSeconds,
   routeCreditsPerSecond,
   selectFlightMode,
@@ -164,4 +165,40 @@ test('selectFlightMode: BURN when 2x fuel fits, CRUISE when only 1x, DRIFT other
 test('selectFlightMode: boundary where 2x fuel exactly fits picks BURN', () => {
   assert.equal(selectFlightMode(50, 100), 'BURN'); // 100 <= 100
   assert.equal(selectFlightMode(100, 100), 'CRUISE'); // 200 > 100, 100 <= 100
+});
+
+test('bestRouteFor returns undefined for an empty candidate list', () => {
+  assert.equal(bestRouteFor([]), undefined);
+});
+
+test('bestRouteFor picks the highest-scored route by default (routeScore)', () => {
+  const thin = route({ good: 'A', sellAt: 'S1', profitPerUnit: 300, tradeVolume: 2 }); // 600
+  const fat = route({ good: 'B', sellAt: 'S2', profitPerUnit: 80, tradeVolume: 40 }); // 3200
+  assert.equal(bestRouteFor([thin, fat], { holdSize: 40 })?.good, 'B');
+});
+
+test('bestRouteFor ranks by a custom throughput score (near beats far)', () => {
+  // Far high-margin route vs near medium route; cr/s scorer should prefer near.
+  const far = route({ good: 'FAR', buyAt: 'B1', sellAt: 'FARSINK', profitPerUnit: 1000, tradeVolume: 40 });
+  const near = route({ good: 'NEAR', buyAt: 'B2', sellAt: 'NEARSINK', profitPerUnit: 300, tradeVolume: 40 });
+  const distanceOf = (_from: string, to: string): number => (to === 'FARSINK' ? 500 : 5);
+  const chosen = bestRouteFor([far, near], {
+    holdSize: 40,
+    score: (r) => routeCreditsPerSecond(r, distanceOf, { holdSize: 40 }),
+  });
+  assert.equal(chosen?.good, 'NEAR');
+});
+
+test('bestRouteFor prefers the assigned good even when not top-scored', () => {
+  const top = route({ good: 'TOP', sellAt: 'S1', profitPerUnit: 300, tradeVolume: 40 });
+  const mine = route({ good: 'MINE', sellAt: 'S2', profitPerUnit: 50, tradeVolume: 40 });
+  assert.equal(bestRouteFor([top, mine], { holdSize: 40, assignedGood: 'MINE' })?.good, 'MINE');
+});
+
+test('bestRouteFor skips avoided goods, falling back only when all are avoided', () => {
+  const a = route({ good: 'A', sellAt: 'S1', profitPerUnit: 300, tradeVolume: 40 });
+  const b = route({ good: 'B', sellAt: 'S2', profitPerUnit: 80, tradeVolume: 40 });
+  assert.equal(bestRouteFor([a, b], { holdSize: 40, avoid: ['A'] })?.good, 'B');
+  // Every good avoided -> last resort returns the top-scored route.
+  assert.equal(bestRouteFor([a, b], { holdSize: 40, avoid: ['A', 'B'] })?.good, 'A');
 });

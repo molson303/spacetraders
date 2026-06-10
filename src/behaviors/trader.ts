@@ -8,6 +8,7 @@ import {
 } from '../state/repos.js';
 import { scanMarket } from '../state/world.js';
 import { distance, travelTo } from '../util/nav.js';
+import { bestRouteFor, routeCreditsPerSecond } from '../util/routes.js';
 import {
   bestSellMarket,
   buyCeiling,
@@ -41,27 +42,42 @@ export interface TraderOptions {
   assignedGood?: string;
   /** Goods claimed by sibling traders, avoided when falling back off-assignment. */
   avoidGoods?: string[];
+  /**
+   * Cooperative stop signal checked before each cycle. Lets the orchestrator
+   * time-box a round so one ship on long-leg routes can't keep the whole fleet
+   * waiting; the in-flight cycle finishes but no new one starts.
+   */
+  shouldStop?: () => boolean;
 }
 
 /**
  * Choose this cycle's route from fresh prices. Prefers the trader's assigned
  * good while it still clears `minProfit`; otherwise falls back to the best route
- * whose good isn't claimed by a sibling trader (and only collides as a last
- * resort when every remaining route is already spoken for).
+ * whose good isn't claimed by a sibling trader. Candidates are ranked by
+ * credits-per-second (profit-per-trip / round-trip travel time) — the same
+ * throughput scorer the orchestrator uses for initial assignments — so far,
+ * thin sinks that crater cr/s aren't re-picked each cycle (the J59 trap).
  */
 function selectRoute(
   system: string,
   minProfit: number,
   assignedGood: string | undefined,
   avoidGoods: Set<string>,
+  holdSize: number,
 ): ArbitrageRoute | undefined {
   const routes = findArbitrageRoutes(system, minProfit, 30);
   if (routes.length === 0) return undefined;
-  if (assignedGood) {
-    const mine = routes.find((r) => r.good === assignedGood);
-    if (mine) return mine;
-  }
-  return routes.find((r) => !avoidGoods.has(r.good)) ?? routes[0];
+  const distanceOf = (from: string, to: string): number => {
+    const a = getWaypointRow(from);
+    const b = getWaypointRow(to);
+    return a && b ? distance(a, b) : 0;
+  };
+  return bestRouteFor(routes, {
+    holdSize,
+    score: (r) => routeCreditsPerSecond(r, distanceOf, { holdSize }),
+    assignedGood,
+    avoid: avoidGoods,
+  });
 }
 
 
@@ -231,6 +247,7 @@ export async function runTrader(
   const minProfit = opts.minProfit ?? 20;
   const assignedGood = opts.assignedGood;
   const avoidGoods = new Set(opts.avoidGoods ?? []);
+  const holdSize = ship.cargo.capacity;
   let cycles = 0;
   let totalProfit = 0;
 
@@ -241,7 +258,11 @@ export async function runTrader(
   ship = await drainStrandedCargo(api, ship, system);
 
   while (cycles < maxCycles) {
-    const route = selectRoute(system, minProfit, assignedGood, avoidGoods);
+    if (opts.shouldStop?.()) {
+      log.info(`${ship.symbol} round time-box reached after ${cycles} cycle(s); stopping`);
+      break;
+    }
+    const route = selectRoute(system, minProfit, assignedGood, avoidGoods, holdSize);
     if (!route) {
       const explored = await explore(api, ship, system);
       if (!explored) {

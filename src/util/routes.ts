@@ -99,6 +99,46 @@ export interface AssignRoutesOptions {
   score?: (route: ArbitrageRoute) => number;
 }
 
+/**
+ * Choose a single best route for one trader, honoring its assigned good and an
+ * avoid-set. Used by the per-cycle trader loop so route re-selection stays
+ * throughput-aware (the orchestrator ranks initial assignments the same way,
+ * but every subsequent cycle and the idle-contractor fallback used to fall back
+ * to raw profit order — which over-picked far, thin sinks that crater
+ * credits-per-second).
+ *
+ * Preference order:
+ *  1. The `assignedGood` if it still has a candidate route (the trader sticks to
+ *     its lane so concurrent traders don't collapse the same spread).
+ *  2. Otherwise the highest-scored route whose good isn't in `avoid`.
+ *  3. As a last resort (every remaining good avoided) the highest-scored route.
+ *
+ * `score` defaults to {@link routeScore}; pass a {@link routeCreditsPerSecond}
+ * scorer to rank by throughput. Returns undefined only when `routes` is empty.
+ */
+export interface BestRouteOptions {
+  holdSize?: number;
+  score?: (route: ArbitrageRoute) => number;
+  assignedGood?: string;
+  avoid?: Iterable<string>;
+}
+
+export function bestRouteFor(
+  routes: ArbitrageRoute[],
+  opts: BestRouteOptions = {},
+): ArbitrageRoute | undefined {
+  if (routes.length === 0) return undefined;
+  const holdSize = opts.holdSize ?? 40;
+  const score = opts.score ?? ((r: ArbitrageRoute) => routeScore(r, holdSize));
+  const avoid = new Set(opts.avoid ?? []);
+  const ranked = [...routes].sort((a, b) => score(b) - score(a));
+  if (opts.assignedGood) {
+    const mine = ranked.find((r) => r.good === opts.assignedGood);
+    if (mine) return mine;
+  }
+  return ranked.find((r) => !avoid.has(r.good)) ?? ranked[0];
+}
+
 export function assignRoutes(
   routes: ArbitrageRoute[],
   count: number,

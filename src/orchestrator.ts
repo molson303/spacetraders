@@ -62,6 +62,12 @@ export interface FleetRoundOptions {
   miners?: number;
   /** Estimated antimatter credits spent per jump, used to net cross-system routes (default 0). */
   crossAntimatterCost?: number;
+  /**
+   * Wall-clock budget for the earners. Traders finish their in-flight cycle but
+   * start no new one past the deadline, so one ship on long-leg routes can't keep
+   * the whole fleet waiting. 0 = unbounded (default).
+   */
+  roundBudgetMs?: number;
 }
 
 export interface FleetRoundResult {
@@ -100,6 +106,10 @@ export async function runFleetRound(
   const scanBudgetMs = opts.scanBudgetMs ?? 180000;
   const minerCount = Math.max(0, opts.miners ?? 0);
   const crossAntimatterCost = Math.max(0, opts.crossAntimatterCost ?? 0);
+  const roundBudgetMs = Math.max(0, opts.roundBudgetMs ?? 0);
+  // Earners finish their in-flight cycle but start no new one past this point.
+  const deadline = roundBudgetMs > 0 ? Date.now() + roundBudgetMs : Infinity;
+  const roundExpired = (): boolean => Date.now() >= deadline;
 
   const agent = await api.getMyAgent();
   const system = systemOf(agent.headquarters);
@@ -279,6 +289,7 @@ export async function runFleetRound(
               cycles: tradeCycles,
               minProfit,
               avoidGoods: claimedGoods,
+              shouldStop: roundExpired,
             });
             result.traderProfit += r.profit;
             log.info(
@@ -319,6 +330,7 @@ export async function runFleetRound(
         minProfit,
         assignedGood: assignedGoods[i],
         avoidGoods: [...assignedGoods.filter((_, j) => j !== i), ...crossGoods],
+        shouldStop: roundExpired,
       }).then(
         (r) => {
           result.traderProfit += r.profit;
