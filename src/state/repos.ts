@@ -447,6 +447,25 @@ export interface ArbitrageRoute {
 }
 
 /**
+ * Goods the arbitrage trader must NEVER route. These are jump-gate construction
+ * inputs: they are only ever moved via `supplyConstruction` (see supplyGate.ts),
+ * never bought/sold on the open market by traders. When we drain their EXPORT
+ * markets to supply the gate, the export price spikes wildly and an unrelated
+ * IMPORT row makes the route finder believe there's a huge spread (e.g. buy ADV
+ * at an importer, "sell" into the spiked EXPORT). EXPORT markets refuse to buy
+ * the good back, so the trip earns 0 and burns the whole purchase — this drained
+ * ~1.1M before it was caught. Excluding them at the source kills the phantom.
+ */
+export const NON_ARBITRAGE_GOODS: readonly string[] = [
+  'ADVANCED_CIRCUITRY',
+  'FAB_MATS',
+  'QUANTUM_STABILIZERS',
+];
+
+/** Positional `?` placeholders for {@link NON_ARBITRAGE_GOODS} in a `NOT IN`. */
+const NON_ARBITRAGE_PLACEHOLDERS = NON_ARBITRAGE_GOODS.map(() => '?').join(', ');
+
+/**
  * Best buy-low / sell-high route in a system from cached latest prices: buy a
  * good where its purchase price is low and sell where its sell price is high,
  * across two different waypoints. Only considers spreads >= `minProfit`.
@@ -463,11 +482,12 @@ export function findBestArbitrage(system: string, minProfit = 1): ArbitrageRoute
          ON s.trade_symbol = b.trade_symbol AND s.system = b.system AND s.waypoint <> b.waypoint
        WHERE b.system = ? AND b.purchase_price > 0 AND s.sell_price > 0
          AND (s.sell_price - b.purchase_price) >= ?
+         AND b.trade_symbol NOT IN (${NON_ARBITRAGE_PLACEHOLDERS})
        ORDER BY (s.sell_price - b.purchase_price) *
                 MIN(COALESCE(b.trade_volume, 1000000), COALESCE(s.trade_volume, 1000000)) DESC
        LIMIT 1`,
     )
-    .get(system, minProfit) as ArbitrageRoute | undefined;
+    .get(system, minProfit, ...NON_ARBITRAGE_GOODS) as ArbitrageRoute | undefined;
   return r;
 }
 
@@ -493,11 +513,12 @@ export function findArbitrageRoutes(
          ON s.trade_symbol = b.trade_symbol AND s.system = b.system AND s.waypoint <> b.waypoint
        WHERE b.system = ? AND b.purchase_price > 0 AND s.sell_price > 0
          AND (s.sell_price - b.purchase_price) >= ?
+         AND b.trade_symbol NOT IN (${NON_ARBITRAGE_PLACEHOLDERS})
        ORDER BY (s.sell_price - b.purchase_price) *
                 MIN(COALESCE(b.trade_volume, 1000000), COALESCE(s.trade_volume, 1000000)) DESC
        LIMIT ?`,
     )
-    .all(system, minProfit, limit) as unknown as ArbitrageRoute[];
+    .all(system, minProfit, ...NON_ARBITRAGE_GOODS, limit) as unknown as ArbitrageRoute[];
 }
 
 /**
@@ -524,11 +545,12 @@ export function findCrossSystemArbitrageRoutes(
          ON s.trade_symbol = b.trade_symbol AND s.system <> b.system
        WHERE b.purchase_price > 0 AND s.sell_price > 0
          AND (s.sell_price - b.purchase_price) >= ?
+         AND b.trade_symbol NOT IN (${NON_ARBITRAGE_PLACEHOLDERS})
        ORDER BY (s.sell_price - b.purchase_price) *
                 MIN(COALESCE(b.trade_volume, 1000000), COALESCE(s.trade_volume, 1000000)) DESC
        LIMIT ?`,
     )
-    .all(minProfit, limit) as unknown as (ArbitrageRoute & {
+    .all(minProfit, ...NON_ARBITRAGE_GOODS, limit) as unknown as (ArbitrageRoute & {
     buySystem: string;
     sellSystem: string;
   })[];
