@@ -43,32 +43,14 @@
 import { SpaceTradersApi } from './client/api.js';
 import { closeDb } from './state/db.js';
 import { runFleetRound } from './orchestrator.js';
-import { purchaseShipAt } from './behaviors/fleet.js';
-import { maybeRepair } from './behaviors/maintenance.js';
-import { scanShipyard, systemOf } from './state/world.js';
 import {
-  findArbitrageRoutes,
-  findJumpGatesBySystem,
-  findShipyardsSellingShipType,
-  findWaypointsByTrait,
-  getJumpGateRow,
-  getWaypointRow,
-  isWaypointUnderConstruction,
-} from './state/repos.js';
-import { kvGet, kvSet } from './state/kv.js';
-import { travelTo } from './util/nav.js';
-import { bestReinvestShip, earnWeight, reinvestEarnerHeadroom } from './util/reinvest.js';
-import { countDistinctRoutes } from './util/routes.js';
-import {
-  planProbeStations,
-  probesToProvision,
-  type StationAssignment,
-  type StationMarket,
-} from './util/stations.js';
-import { orderShipyardsForPurchase, selectShipyard, type ShipyardCandidate } from './util/shipyard.js';
+  maybeReinvest,
+  maybeProvisionProbes,
+  maybeRepairFleet,
+  type MaintenanceConfig,
+} from './fleet/maintenance.js';
 import { sleep } from './client/rateLimiter.js';
 import { log } from './util/logger.js';
-import type { ShipType } from './types/index.js';
 
 const CFG = {
   maxContracts: Number(process.env.MAX_CONTRACTS ?? 1),
@@ -94,64 +76,6 @@ const CFG = {
   repairYard: process.env.REPAIR_YARD?.trim() || process.env.REINVEST_YARD?.trim() || undefined,
 };
 
-/**
- * Discover the shipyard to use for a given purpose. Honors an explicit operator
- * override (REINVEST_YARD / REPAIR_YARD); otherwise auto-discovers SHIPYARD
- * waypoints in the agent's home system and picks the one nearest to `from`
- * (falling back to the first). Returns undefined when nothing is available.
- */
-function discoverShipyard(
-  system: string,
-  override: string | undefined,
-  from: { x: number; y: number } | undefined,
-): string | undefined {
-  const candidates: ShipyardCandidate[] = findWaypointsByTrait(system, 'SHIPYARD').map((w) => ({
-    symbol: w.symbol,
-    x: w.x,
-    y: w.y,
-  }));
-  return selectShipyard(candidates, { override, from });
-}
-
-/** Coordinates of a waypoint, if known in the local world cache. */
-function coordsOf(symbol: string): { x: number; y: number } | undefined {
-  const wp = getWaypointRow(symbol);
-  return wp ? { x: wp.x, y: wp.y } : undefined;
-}
-
-/**
- * Marketplaces eligible for a stationed probe. Home-system markets always
- * qualify (priority 1, covered first). When the home jump gate is operational,
- * already-hydrated markets in directly-connected neighbor systems are also
- * included (priority 0) so cross-system price coverage fills in once MAX_PROBES
- * allows. While the gate is under construction only home markets are returned,
- * keeping cross-system stationing inert until jumps are possible.
- */
-function gatherStationMarkets(system: string): StationMarket[] {
-  const home: StationMarket[] = findWaypointsByTrait(system, 'MARKETPLACE').map((w) => ({
-    symbol: w.symbol,
-    system: w.system,
-    priority: 1,
-  }));
-
-  const homeGate = findJumpGatesBySystem(system)[0];
-  const gateBlocked = homeGate ? isWaypointUnderConstruction(homeGate.symbol) : true;
-  if (!homeGate || gateBlocked) return home;
-
-  const neighborSystems = new Set(
-    (getJumpGateRow(homeGate.symbol)?.connections ?? [])
-      .map((c) => systemOf(c))
-      .filter((s) => s !== system),
-  );
-  const neighbors: StationMarket[] = [];
-  for (const sys of neighborSystems) {
-    for (const w of findWaypointsByTrait(sys, 'MARKETPLACE')) {
-      neighbors.push({ symbol: w.symbol, system: w.system, priority: 0 });
-    }
-  }
-  return [...home, ...neighbors];
-}
-
 let stopping = false;
 function requestStop(signal: string): void {
   if (stopping) {
@@ -164,223 +88,22 @@ function requestStop(signal: string): void {
 process.on('SIGINT', () => requestStop('SIGINT'));
 process.on('SIGTERM', () => requestStop('SIGTERM'));
 
-/**
- * If reinvestment is enabled and we have surplus credits and fleet headroom,
- * route a free-moving scout to the shipyard, read live prices, and buy as many
- * ships as the surplus allows — each time picking the best ROI (earning weight
- * per credit) ship that's affordable. Runs between rounds. Returns the number
- * of ships purchased.
- */
-async function maybeReinvest(api: SpaceTradersApi): Promise<number> {
-  if (!CFG.reinvest) return 0;
-  let agent = await api.getMyAgent();
-  let fleet = (await api.listShips()).data;
-  // Only cargo earners count against MAX_SHIPS; stationed/scout probes live on
-  // their own MAX_PROBES budget and must never crowd out income ships here.
-  const earnerCount = fleet.filter((s) => s.cargo.capacity > 0 && s.fuel.capacity > 0).length;
-  if (earnerCount >= CFG.maxShips) return 0;
-  // Cheap pre-check: don't route a scout if we can't plausibly afford a ship.
-  if (agent.credits - CFG.reserve < CFG.shipCostEst) return 0;
-
-  // Route-diversity cap: never grow earners past the number of distinct
-  // profitable routes in-system. Beyond that, a new hauler can only double up on
-  // a good already being traded and collapse its spread, so the marginal ship
-  // earns almost nothing. We still honor MAX_SHIPS as the hard ceiling and never
-  // shrink below the current earner count (we don't sell ships). Cheap pre-check
-  // so we skip the scout trip entirely when the fleet already covers the routes.
-  const system = systemOf(agent.headquarters);
-  const distinctRoutes = countDistinctRoutes(findArbitrageRoutes(system, CFG.minProfit, 30));
-  const headroom = reinvestEarnerHeadroom(distinctRoutes, earnerCount);
-  const shipTarget = Math.min(CFG.maxShips, earnerCount + headroom);
-  if (shipTarget <= earnerCount) {
-    log.info(
-      `reinvest: ${earnerCount} earners already cover ${distinctRoutes} distinct route(s); ` +
-        `holding (maxShips=${CFG.maxShips})`,
-    );
-    return 0;
-  }
-
-  // Route a flex probe (fuel-free, not holding a station) to the yard so live
-  // prices populate, falling back to any fuel-free ship, then any ship.
-  const stationedShips = new Set(
-    (kvGet<StationAssignment[]>('probe_stations') ?? []).map((a) => a.ship),
-  );
-  const scout =
-    fleet.find((s) => s.fuel.capacity === 0 && !stationedShips.has(s.symbol)) ??
-    fleet.find((s) => s.fuel.capacity === 0) ??
-    fleet[0]!;
-  const yardSymbol = discoverShipyard(
-    system,
-    CFG.reinvestYard,
-    coordsOf(scout.nav.waypointSymbol) ?? coordsOf(agent.headquarters),
-  );
-  if (!yardSymbol) {
-    log.info(`reinvest: no shipyard found in ${system}; skipping`);
-    return 0;
-  }
-  if (scout.nav.waypointSymbol !== yardSymbol) {
-    await travelTo(api, scout, yardSymbol);
-  }
-
-  let bought = 0;
-  while (earnerCount + bought < shipTarget) {
-    const budget = agent.credits - CFG.reserve;
-    if (budget <= 0) break;
-
-    const yard = await scanShipyard(api, system, yardSymbol);
-    const candidates = (yard.ships ?? []).map((s) => ({ type: s.type, price: s.purchasePrice }));
-    const pick = bestReinvestShip(candidates, {
-      budget,
-      earnRate: earnWeight,
-      minRoi: CFG.minRoi,
-    });
-    if (!pick) {
-      log.info(`reinvest: nothing affordable/worthwhile (budget=${budget}); stopping`);
-      break;
-    }
-
-    log.info(
-      `reinvest: credits=${agent.credits} buying ${pick.type} @ ${pick.price} at ${yardSymbol} ` +
-        `(earners ${earnerCount + bought}/${shipTarget}, routes=${distinctRoutes}, roi=${(earnWeight(pick.type) / pick.price).toFixed(5)})`,
-    );
-    const res = await purchaseShipAt(api, pick.type as ShipType, yardSymbol, {
-      maxPrice: pick.price + CFG.reserve,
-    });
-    if (!res.ship) break;
-    bought++;
-    agent = { ...agent, credits: res.credits };
-  }
-
-  if (bought > 0) log.info(`reinvest: bought ${bought} ship(s) this cycle`);
-  return bought;
-}
-
-/**
- * Provision and station market-data probes. When MAX_PROBES > 0, buys fuel-free
- * probes — on their own budget, separate from the MAX_SHIPS earner cap — up to
- * one per home-system marketplace, then assigns every probe to a market and
- * persists the plan so the next round's station keeper refreshes prices in
- * place. Re-plans each cycle even when buying nothing, so existing probes pick
- * up stations and vacancies (sold/lost probes, new markets) get backfilled.
- * Returns the number of probes bought.
- */
-async function maybeProvisionProbes(api: SpaceTradersApi): Promise<number> {
-  if (CFG.maxProbes <= 0) return 0;
-  let agent = await api.getMyAgent();
-  let fleet = (await api.listShips()).data;
-  const system = systemOf(agent.headquarters);
-
-  const isProbe = (s: { fuel: { capacity: number } }): boolean => s.fuel.capacity === 0;
-  const markets: StationMarket[] = gatherStationMarkets(system);
-  if (markets.length === 0) return 0;
-
-  const existing = kvGet<StationAssignment[]>('probe_stations') ?? [];
-  const probes = fleet.filter(isProbe);
-  const stationedNow = planProbeStations(
-    markets,
-    probes.map((p) => ({ symbol: p.symbol })),
-    existing,
-  ).length;
-  const buyCount = probesToProvision({
-    marketCount: markets.length,
-    stationed: stationedNow,
-    currentProbes: probes.length,
-    maxProbes: CFG.maxProbes,
-    budget: agent.credits - CFG.reserve,
-    probePrice: CFG.probeCostEst,
-  });
-
-  let bought = 0;
-  if (buyCount > 0) {
-    let ferry = probes[0] ?? fleet[0]!;
-    // Prefer a yard already known to stock SHIP_PROBE over the merely-nearest
-    // one (the old bug ferried to the closest yard, which never sold probes,
-    // bought nothing, and dragged a probe off its station every round).
-    const candidates: ShipyardCandidate[] = findWaypointsByTrait(system, 'SHIPYARD').map((w) => ({
-      symbol: w.symbol,
-      x: w.x,
-      y: w.y,
-    }));
-    const sellers = new Set(
-      findShipyardsSellingShipType(system, 'SHIP_PROBE').map((s) => s.symbol),
-    );
-    const ordered = orderShipyardsForPurchase(candidates, sellers, {
-      override: CFG.reinvestYard,
-      from: coordsOf(ferry.nav.waypointSymbol) ?? coordsOf(agent.headquarters),
-    });
-    if (ordered.length === 0) {
-      log.info(`provision: no shipyard found in ${system}; skipping buy`);
-    } else {
-      for (const yardSymbol of ordered) {
-        if (bought >= buyCount) break;
-        if (ferry.nav.waypointSymbol !== yardSymbol) ferry = await travelTo(api, ferry, yardSymbol);
-        let soldHere = false;
-        while (bought < buyCount) {
-          const yard = await scanShipyard(api, system, yardSymbol);
-          const offer = (yard.ships ?? []).find((s) => s.type === 'SHIP_PROBE');
-          if (!offer) break;
-          soldHere = true; // this yard stocks probes; don't wander to others
-          if (agent.credits - CFG.reserve < offer.purchasePrice) break;
-          const res = await purchaseShipAt(api, 'SHIP_PROBE' as ShipType, yardSymbol, {
-            maxPrice: offer.purchasePrice + CFG.reserve,
-          });
-          if (!res.ship) break;
-          bought++;
-          agent = { ...agent, credits: res.credits };
-        }
-        if (soldHere) break;
-        log.info(`provision: ${yardSymbol} does not sell SHIP_PROBE; trying next yard`);
-      }
-      if (bought > 0) log.info(`provision: bought ${bought} probe(s) this cycle`);
-    }
-  }
-
-  // Re-plan over ALL current probes (including any just bought) and persist so
-  // the orchestrator's station keeper can service them next round.
-  if (bought > 0) fleet = (await api.listShips()).data;
-  const allProbes = fleet.filter(isProbe).map((p) => ({ symbol: p.symbol }));
-  const plan = planProbeStations(markets, allProbes, existing);
-  kvSet('probe_stations', plan);
-  log.info(
-    `provision: ${plan.length}/${markets.length} market(s) stationed (${allProbes.length} probe(s))`,
-  );
-  return bought;
-}
-
-/**
- * Repair any worn ships between rounds. Each repair is capped at the spendable
- * surplus (credits - reserve) so maintenance never eats into the reserve, and
- * healthy ships are skipped cheaply by the condition check before any travel.
- * Returns the number of ships repaired.
- */
-async function maybeRepairFleet(api: SpaceTradersApi): Promise<number> {
-  if (!CFG.repair) return 0;
-  let repaired = 0;
-  const fleet = (await api.listShips()).data;
-  for (const ship of fleet) {
-    if (stopping) break;
-    const agent = await api.getMyAgent();
-    const yardSymbol = discoverShipyard(
-      systemOf(agent.headquarters),
-      CFG.repairYard,
-      coordsOf(ship.nav.waypointSymbol) ?? coordsOf(agent.headquarters),
-    );
-    if (!yardSymbol) {
-      log.info(`maintenance: no shipyard found for ${ship.symbol}; skipping`);
-      continue;
-    }
-    const before = ship.frame.condition;
-    const result = await maybeRepair(api, ship, {
-      shipyard: yardSymbol,
-      threshold: CFG.repairThreshold,
-      maxSpend: Math.max(0, agent.credits - CFG.reserve),
-    });
-    // Count it as repaired only when condition actually improved.
-    if (before !== undefined && (result.frame.condition ?? 0) > before) repaired++;
-  }
-  if (repaired > 0) log.info(`maintenance: repaired ${repaired} ship(s) this cycle`);
-  return repaired;
-}
+/** Map the supervisor's env config onto the shared maintenance config. */
+const maintenanceCfg: MaintenanceConfig = {
+  reinvest: CFG.reinvest,
+  reserve: CFG.reserve,
+  maxShips: CFG.maxShips,
+  maxProbes: CFG.maxProbes,
+  probeCostEst: CFG.probeCostEst,
+  minProfit: CFG.minProfit,
+  reinvestYard: CFG.reinvestYard,
+  shipCostEst: CFG.shipCostEst,
+  minRoi: CFG.minRoi,
+  repair: CFG.repair,
+  repairThreshold: CFG.repairThreshold,
+  repairYard: CFG.repairYard,
+  stopping: () => stopping,
+};
 
 async function main(): Promise<void> {
   const api = new SpaceTradersApi();
@@ -430,21 +153,21 @@ async function main(): Promise<void> {
     }
 
     try {
-      await maybeReinvest(api);
+      await maybeReinvest(api, maintenanceCfg);
     } catch (err) {
       log.warn(`reinvest skipped: ${(err as Error).message}`);
     }
 
     if (stopping) break;
     try {
-      await maybeProvisionProbes(api);
+      await maybeProvisionProbes(api, maintenanceCfg);
     } catch (err) {
       log.warn(`probe provisioning skipped: ${(err as Error).message}`);
     }
 
     if (stopping) break;
     try {
-      await maybeRepairFleet(api);
+      await maybeRepairFleet(api, maintenanceCfg);
     } catch (err) {
       log.warn(`repair skipped: ${(err as Error).message}`);
     }
