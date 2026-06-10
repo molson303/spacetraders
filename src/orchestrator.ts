@@ -43,6 +43,7 @@ import {
   isWaypointUnderConstruction,
 } from './state/repos.js';
 import { kvGet } from './state/kv.js';
+import { getWallet, setWallet } from './state/wallet.js';
 import { assignRoutes, routeCreditsPerSecond, routeScore } from './util/routes.js';
 import { findJumpPath } from './util/jumpPath.js';
 import { rankCrossRoutes, assignCrossRoutes, type CrossSystemRoute } from './util/crossRoutes.js';
@@ -121,12 +122,21 @@ export async function runFleetRound(
   const agent = await api.getMyAgent();
   const system = systemOf(agent.headquarters);
 
-  // Per-trade spend cap derived from the wallet at round start. Bounds how much
+  // Per-trade spend cap, sized as a fraction of the LIVE wallet. Bounds how much
   // capital any single trader can sink into one position (thin-sink saturation
-  // protection); 0 fraction disables the cap.
+  // protection); 0 fraction disables the cap. Resolved fresh on each trade via
+  // the wallet mirror (updated by every buy/sell) so the cap grows with the
+  // wallet during a long round instead of freezing at the round-start balance —
+  // a stale low cap otherwise locks traders out of high-value routes all round.
   const maxTradeFraction = Math.max(0, opts.maxTradeFraction ?? 0);
-  const maxTradeSpend =
-    maxTradeFraction > 0 ? Math.max(0, Math.floor(agent.credits * maxTradeFraction)) : undefined;
+  setWallet(agent.credits);
+  const maxTradeSpend: (() => number | undefined) | undefined =
+    maxTradeFraction > 0
+      ? () => {
+          const c = getWallet();
+          return c === undefined ? undefined : Math.max(0, Math.floor(c * maxTradeFraction));
+        }
+      : undefined;
 
   const ships = await hydrateShips(api);
   await hydrateSystemWaypoints(api, system);

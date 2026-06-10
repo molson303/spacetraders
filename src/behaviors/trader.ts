@@ -48,8 +48,13 @@ export interface TraderOptions {
    * capital at risk so one trader (with REINVEST off) can't sink the whole
    * wallet into a thin-sink position — a big fill craters the sink and strands
    * cargo below the profit floor. Undefined = no cap.
+   *
+   * May be a resolver `() => number | undefined` evaluated fresh each cycle so
+   * the cap tracks the LIVE wallet rather than a stale round-start snapshot (a
+   * frozen low cap otherwise locks traders out of high-value routes for the
+   * whole round after a dip).
    */
-  maxTradeSpend?: number;
+  maxTradeSpend?: number | (() => number | undefined);
   /**
    * Cooperative stop signal checked before each cycle. Lets the orchestrator
    * time-box a round so one ship on long-leg routes can't keep the whole fleet
@@ -164,7 +169,7 @@ export async function runRoute(
   ship: Ship,
   route: ArbitrageRoute,
   minProfit: number,
-  maxTradeSpend?: number,
+  maxTradeSpend?: number | (() => number | undefined),
 ): Promise<{ ship: Ship; profit: number }> {
   log.info(
     `${ship.symbol} arb ${route.good}: buy@${route.buyAt}(${route.buyPrice}) -> sell@${route.sellAt}(${route.sellPrice}) ~${route.profitPerUnit}/u`,
@@ -177,16 +182,18 @@ export async function runRoute(
   const depthUnits = depthCappedBuyUnits(freeCargo, route.sellVolume, SELL_DEPTH_MULTIPLE);
   // Then bound the spend so one trade can't commit the whole wallet to a single
   // thin-sink position (the JEWELRY -75.8k / FOOD -46k saturation losses).
-  const buyUnits = budgetCappedBuyUnits(depthUnits, route.buyPrice, maxTradeSpend);
+  // Resolve the cap fresh each cycle so it tracks the live wallet.
+  const maxSpend = typeof maxTradeSpend === 'function' ? maxTradeSpend() : maxTradeSpend;
+  const buyUnits = budgetCappedBuyUnits(depthUnits, route.buyPrice, maxSpend);
   if (buyUnits <= 0) {
     log.info(
-      `${ship.symbol} budget cap ${route.good}: ~${route.buyPrice}/u exceeds per-trade budget ${maxTradeSpend}; skipping route`,
+      `${ship.symbol} budget cap ${route.good}: ~${route.buyPrice}/u exceeds per-trade budget ${maxSpend}; skipping route`,
     );
     return { ship, profit: 0 };
   }
   if (buyUnits < freeCargo) {
     log.info(
-      `${ship.symbol} buy cap ${route.good}: ${buyUnits}/${freeCargo} (sellVol=${route.sellVolume}, maxSpend=${maxTradeSpend ?? '∞'})`,
+      `${ship.symbol} buy cap ${route.good}: ${buyUnits}/${freeCargo} (sellVol=${route.sellVolume}, maxSpend=${maxSpend ?? '∞'})`,
     );
   }
   const buy = await buyGoodHere(api, ship, route.good, buyUnits, {

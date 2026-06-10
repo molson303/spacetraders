@@ -1,4 +1,5 @@
 import { getDb } from './db.js';
+import { setWallet } from './wallet.js';
 import type {
   Contract,
   JumpGate,
@@ -234,6 +235,9 @@ export interface TxnRecord {
 }
 
 export function recordTransaction(t: TxnRecord): void {
+  // Keep the live-wallet mirror current so the per-trade spend cap can size
+  // against the real balance instead of a stale round-start snapshot.
+  setWallet(t.creditsAfter);
   getDb()
     .prepare(
       `INSERT INTO transactions (ship, kind, waypoint, trade_symbol, units, price_per, total, credits_after)
