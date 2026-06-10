@@ -46,6 +46,7 @@ import {
   isWaypointUnderConstruction,
 } from './state/repos.js';
 import { kvGet } from './state/kv.js';
+import { getWallet, setWallet } from './state/wallet.js';
 import { distance } from './util/nav.js';
 import { findJumpPath } from './util/jumpPath.js';
 import { ClaimRegistry } from './coordinator/claimRegistry.js';
@@ -70,6 +71,11 @@ const CFG = {
   minProfit: Number(process.env.MIN_PROFIT ?? 20),
   maxContracts: Number(process.env.MAX_CONTRACTS ?? 1),
   contractor: (process.env.CONTRACTOR ?? '1') === '1',
+  // Per-trade spend cap as a fraction of the LIVE wallet (0 disables). Mirrors
+  // supervisor.ts: bounds capital any single trip can sink into one position so
+  // a big fill can't crater a thin sink. The depth cap is the primary thin-sink
+  // guard; this is the secondary whole-wallet-dump guard.
+  maxTradeFraction: Number(process.env.MAX_TRADE_FRACTION ?? 0.25),
   crossAntimatterCost: Number(process.env.CROSS_ANTIMATTER_COST ?? 0),
   reinvestIntervalMs: Number(process.env.REINVEST_INTERVAL_MS ?? 600_000),
   provisionIntervalMs: Number(process.env.PROVISION_INTERVAL_MS ?? 600_000),
@@ -122,7 +128,7 @@ async function main(): Promise<void> {
   const baseline = agent.credits;
   log.info(
     `fleet start | credits=${baseline} system=${system} crossShips=${CFG.crossShips} ` +
-      `contractor=${CFG.contractor} maxShips=${CFG.maxShips}`,
+      `contractor=${CFG.contractor} maxShips=${CFG.maxShips} maxTradeFraction=${CFG.maxTradeFraction}`,
   );
 
   // Hydrate the world once up front; probes + the provisioning timer keep prices
@@ -134,6 +140,18 @@ async function main(): Promise<void> {
   await hydrateContracts(api);
 
   const registry = new ClaimRegistry();
+
+  // Live per-trade spend cap, resolved fresh each trip as a fraction of the
+  // current wallet (the wallet mirror is updated by every buy/sell). Keeps the
+  // cap proportional to the real balance instead of a stale snapshot.
+  setWallet(agent.credits);
+  const maxTradeSpend: (() => number | undefined) | undefined =
+    CFG.maxTradeFraction > 0
+      ? () => {
+          const c = getWallet();
+          return c === undefined ? undefined : Math.max(0, Math.floor(c * CFG.maxTradeFraction));
+        }
+      : undefined;
 
   // ---- Shared route providers (read live each trip) ----------------------
   const distanceOf = (from: string, to: string): number => {
@@ -171,7 +189,7 @@ async function main(): Promise<void> {
   const depsFor = (): ShipAgentDeps => ({
     localCandidates,
     crossCandidates,
-    execLocal: (ship, route) => runRoute(api, ship, route, CFG.minProfit),
+    execLocal: (ship, route) => runRoute(api, ship, route, CFG.minProfit, maxTradeSpend),
     execCross: (ship, route) => runRemoteTrade(api, ship, route, CFG.minProfit),
     execContract: (ship) =>
       runContractPipeline(api, ship, system, {
