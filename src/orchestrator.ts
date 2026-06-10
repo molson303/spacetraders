@@ -120,8 +120,22 @@ export async function runFleetRound(
   await hydrateJumpGates(api, system);
   await hydrateContracts(api);
 
-  const haulers = ships.filter(isHauler);
-  const scouts = ships.filter((s) => !isHauler(s));
+  // Ships listed in EXCLUDE_SHIPS are dropped from this round entirely (haulers
+  // and scouts). Used to dedicate a ship to an out-of-band job (e.g. supplying
+  // the jump-gate construction site) without the round fighting over it.
+  const excluded = new Set(
+    (process.env.EXCLUDE_SHIPS ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+  const usableShips = excluded.size ? ships.filter((s) => !excluded.has(s.symbol)) : ships;
+  if (excluded.size) {
+    log.info(`excluding ${excluded.size} ship(s) from round: ${[...excluded].join(', ')}`);
+  }
+
+  const haulers = usableShips.filter(isHauler);
+  const scouts = usableShips.filter((s) => !isHauler(s));
   log.info(
     `fleet: ${haulers.length} hauler(s) [${haulers.map((s) => s.symbol).join(', ')}], ` +
       `${scouts.length} scout(s) [${scouts.map((s) => s.symbol).join(', ')}]`,

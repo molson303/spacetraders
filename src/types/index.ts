@@ -44,6 +44,20 @@ export interface Waypoint {
   chart?: { submittedBy?: string; submittedOn?: string; waypointSymbol?: string };
 }
 
+// ---------- Construction ----------
+
+export interface ConstructionMaterial {
+  tradeSymbol: string;
+  required: number;
+  fulfilled: number;
+}
+
+export interface Construction {
+  symbol: string;
+  materials: ConstructionMaterial[];
+  isComplete: boolean;
+}
+
 // ---------- Markets ----------
 
 export interface MarketTradeGood {

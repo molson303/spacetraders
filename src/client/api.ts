@@ -2,6 +2,7 @@ import type {
   Agent,
   ApiItem,
   ApiList,
+  Construction,
   Contract,
   Extraction,
   JumpGate,
@@ -77,6 +78,35 @@ export class SpaceTradersApi {
   async getMarket(system: string, waypoint: string): Promise<Market> {
     return (await this.http.get<ApiItem<Market>>(`/systems/${system}/waypoints/${waypoint}/market`))
       .data;
+  }
+
+  // ---------- Construction ----------
+  /** Current construction progress for a waypoint (e.g. a jump gate under build). */
+  async getConstruction(system: string, waypoint: string): Promise<Construction> {
+    return (
+      await this.http.get<ApiItem<Construction>>(
+        `/systems/${system}/waypoints/${waypoint}/construction`,
+      )
+    ).data;
+  }
+
+  /**
+   * Deliver construction materials from a docked ship to a construction site.
+   * Returns the updated construction progress and the ship's remaining cargo.
+   */
+  async supplyConstruction(
+    system: string,
+    waypoint: string,
+    shipSymbol: string,
+    tradeSymbol: string,
+    units: number,
+  ): Promise<{ construction: Construction; cargo: ShipCargo }> {
+    return (
+      await this.http.post<ApiItem<{ construction: Construction; cargo: ShipCargo }>>(
+        `/systems/${system}/waypoints/${waypoint}/construction/supply`,
+        { shipSymbol, tradeSymbol, units },
+      )
+    ).data;
   }
 
   async getShipyard(system: string, waypoint: string): Promise<Shipyard> {
