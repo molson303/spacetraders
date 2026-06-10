@@ -58,7 +58,7 @@ import { runContractPipeline } from './behaviors/contractPipeline.js';
 import { runStationKeeping } from './behaviors/stationKeeper.js';
 import { runRemoteScout } from './behaviors/remoteScout.js';
 import { runScanner } from './behaviors/scanner.js';
-import { maybeReinvest, maybeProvisionProbes, type MaintenanceConfig } from './fleet/maintenance.js';
+import { maybeReinvest, maybeProvisionProbes, repairWornShip, type MaintenanceConfig } from './fleet/maintenance.js';
 import { sleep } from './client/rateLimiter.js';
 import { log } from './util/logger.js';
 import type { CrossSystemRoute } from './util/crossRoutes.js';
@@ -87,6 +87,9 @@ const CFG = {
   reinvestYard: process.env.REINVEST_YARD?.trim() || undefined,
   shipCostEst: Number(process.env.SHIP_COST_EST ?? 90000),
   minRoi: Number(process.env.MIN_ROI ?? 0),
+  repairThreshold: Number(process.env.REPAIR_THRESHOLD ?? 0.4),
+  repairYard: process.env.REPAIR_YARD?.trim() || process.env.REINVEST_YARD?.trim() || undefined,
+  repairEnabled: (process.env.REPAIR ?? '1') === '1',
 };
 
 let stopping = false;
@@ -182,6 +185,14 @@ async function main(): Promise<void> {
     stopping: () => stopping,
     idleDelay: () => sleep(CFG.idleMs),
     onTrip,
+    repairIfWorn: CFG.repairEnabled
+      ? (ship) =>
+          repairWornShip(api, ship, {
+            reserve: CFG.reserve,
+            repairThreshold: CFG.repairThreshold,
+            repairYard: CFG.repairYard,
+          })
+      : undefined,
   });
 
   const launch = (ship: Ship, role: ShipRole): void => {

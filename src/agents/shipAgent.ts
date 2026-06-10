@@ -48,6 +48,12 @@ export interface ShipAgentDeps {
   execContract?: (ship: Ship) => Promise<number>;
   /** Re-fetch live ship state (the contract pipeline moves the ship internally). */
   refetchShip: (symbol: string) => Promise<Ship>;
+  /**
+   * Self-repair check run between trips. Self-gating: a no-op (cheap, no I/O)
+   * when the ship is healthy, otherwise diverts the ship to a shipyard and
+   * returns it repaired. Omit to disable mid-loop repair.
+   */
+  repairIfWorn?: (ship: Ship) => Promise<Ship>;
   distanceOf: (from: string, to: string) => number;
   hopsBetween: (fromSystem: string, toSystem: string) => number | undefined;
   /** False while the home jump gate is under construction. */
@@ -122,6 +128,16 @@ export async function runShipAgent(
   while (!deps.stopping() && trips < maxTrips) {
     let kind: TripKind = 'idle';
     let tripProfit = 0;
+
+    // Between trips, divert to repair if a component has worn past the
+    // threshold. Self-gating, so this is a cheap no-op while the ship is healthy.
+    if (deps.repairIfWorn) {
+      try {
+        ship = await deps.repairIfWorn(ship);
+      } catch (err) {
+        log.warn(`${ship.symbol} repair check failed: ${(err as Error).message}`);
+      }
+    }
 
     try {
       if (opts.role === 'contractor') {

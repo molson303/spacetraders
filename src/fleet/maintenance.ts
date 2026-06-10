@@ -11,7 +11,7 @@
 
 import type { SpaceTradersApi } from '../client/api.js';
 import { purchaseShipAt } from '../behaviors/fleet.js';
-import { maybeRepair } from '../behaviors/maintenance.js';
+import { maybeRepair, needsRepair } from '../behaviors/maintenance.js';
 import { scanShipyard, systemOf } from '../state/world.js';
 import {
   findArbitrageRoutes,
@@ -34,7 +34,7 @@ import {
 } from '../util/stations.js';
 import { orderShipyardsForPurchase, selectShipyard, type ShipyardCandidate } from '../util/shipyard.js';
 import { log } from '../util/logger.js';
-import type { ShipType } from '../types/index.js';
+import type { Ship, ShipType } from '../types/index.js';
 
 export interface MaintenanceConfig {
   reinvest: boolean;
@@ -318,4 +318,42 @@ export async function maybeRepairFleet(
   }
   if (repaired > 0) log.info(`maintenance: repaired ${repaired} ship(s) this cycle`);
   return repaired;
+}
+
+export interface RepairDivertConfig {
+  reserve: number;
+  repairThreshold: number;
+  repairYard: string | undefined;
+}
+
+/**
+ * Mid-loop self-repair for the continuous fleet: a ship checks its own wear
+ * between trips and diverts to a shipyard only when a component has fallen to/
+ * below the threshold. Self-gating — when the ship is healthy this is a pure,
+ * cheap in-memory check with no API calls, so a trade agent can call it every
+ * trip. When worn, it discovers the nearest shipyard, caps the spend at the
+ * spendable surplus, and repairs to full. Returns the (possibly repaired) ship.
+ */
+export async function repairWornShip(
+  api: SpaceTradersApi,
+  ship: Ship,
+  cfg: RepairDivertConfig,
+): Promise<Ship> {
+  if (!needsRepair(ship, cfg.repairThreshold)) return ship;
+  const agent = await api.getMyAgent();
+  const system = systemOf(agent.headquarters);
+  const yardSymbol = discoverShipyard(
+    system,
+    cfg.repairYard,
+    coordsOf(ship.nav.waypointSymbol) ?? coordsOf(agent.headquarters),
+  );
+  if (!yardSymbol) {
+    log.info(`repair: no shipyard found for ${ship.symbol}; deferring`);
+    return ship;
+  }
+  return maybeRepair(api, ship, {
+    shipyard: yardSymbol,
+    threshold: cfg.repairThreshold,
+    maxSpend: Math.max(0, agent.credits - cfg.reserve),
+  });
 }

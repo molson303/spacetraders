@@ -234,6 +234,54 @@ test('onTrip reports kind and profit for each trip', async () => {
   ]);
 });
 
+test('repair check runs before every trip and updates the ship', async () => {
+  const reg = new ClaimRegistry();
+  const seen: string[] = [];
+  await runShipAgent(
+    ship('WORN'),
+    reg,
+    deps({
+      repairIfWorn: async (s) => {
+        seen.push(s.symbol);
+        return s; // pretend healthy / repaired, same ship
+      },
+    }),
+    opts({ role: 'local', maxTrips: 2 }),
+  );
+  assert.deepEqual(seen, ['WORN', 'WORN']); // once per trip
+});
+
+test('a repair diversion swaps in the repaired ship for the trip', async () => {
+  const reg = new ClaimRegistry();
+  let tradedShip: string | undefined;
+  await runShipAgent(
+    ship('S1'),
+    reg,
+    deps({
+      repairIfWorn: async () => ship('S1-REPAIRED'),
+      execLocal: async (s) => ((tradedShip = s.symbol), { ship: s, profit: 1 }),
+    }),
+    opts({ role: 'local', maxTrips: 1 }),
+  );
+  assert.equal(tradedShip, 'S1-REPAIRED');
+});
+
+test('a failing repair check does not abort the trip', async () => {
+  const reg = new ClaimRegistry();
+  const res = await runShipAgent(
+    ship(),
+    reg,
+    deps({
+      repairIfWorn: async () => {
+        throw new Error('yard unreachable');
+      },
+    }),
+    opts({ role: 'local', maxTrips: 1 }),
+  );
+  assert.equal(res.trips, 1);
+  assert.equal(res.profit, 100); // trade still ran
+});
+
 test('a stop signal mid-run halts further trips', async () => {
   const reg = new ClaimRegistry();
   let n = 0;
