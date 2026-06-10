@@ -82,7 +82,7 @@ function selectRoute(
 
 
 /** Scan the market at the ship's current waypoint, capturing live prices. */
-async function scanHere(api: SpaceTradersApi, ship: Ship): Promise<void> {
+export async function scanHere(api: SpaceTradersApi, ship: Ship): Promise<void> {
   try {
     await scanMarket(api, ship.nav.systemSymbol, ship.nav.waypointSymbol);
   } catch (err) {
@@ -100,7 +100,7 @@ async function scanHere(api: SpaceTradersApi, ship: Ship): Promise<void> {
  * Goods with no known market are left in place. A ship that starts with an empty
  * hold (the healthy case) is a no-op.
  */
-async function drainStrandedCargo(
+export async function drainStrandedCargo(
   api: SpaceTradersApi,
   ship: Ship,
   system: string,
@@ -151,7 +151,7 @@ async function explore(api: SpaceTradersApi, ship: Ship, system: string): Promis
  * tapped out is offloaded at the next-best known market. Returns the ship and
  * realized profit (revenue - spend) for the cycle.
  */
-async function runRoute(
+export async function runRoute(
   api: SpaceTradersApi,
   ship: Ship,
   route: ArbitrageRoute,
