@@ -155,7 +155,8 @@ async function claimOrNegotiate(
   const now = Date.now();
   const system = ship.nav.systemSymbol;
   const from = ship.nav.waypointSymbol;
-  const existing = (await api.listContracts()).data
+  const contracts = (await api.listContracts()).data;
+  const existing = contracts
     .filter((c) => !c.fulfilled && !claimed.has(c.id))
     .filter((c) => new Date(c.terms.deadline).getTime() > now)
     .filter((c) => procurementGood(c))
@@ -172,6 +173,19 @@ async function claimOrNegotiate(
     claimed.add(c.id);
     log.info(`${ship.symbol} claimed existing contract ${c.id}`);
     return c;
+  }
+
+  // The agent may hold only ONE active contract. If an already-accepted,
+  // unfulfilled contract occupies the slot but isn't workable now (e.g. no
+  // in-system exporter while the jump gate is under construction), negotiating
+  // a new one is guaranteed to 400 ("already has an active contract"). Skip the
+  // doomed negotiate + HQ round trip and let the caller fall back to trading.
+  const activeBlocking = contracts.find((c) => c.accepted && !c.fulfilled);
+  if (activeBlocking) {
+    log.info(
+      `${ship.symbol} active contract ${activeBlocking.id} occupies the slot but isn't workable now; skipping negotiation`,
+    );
+    return undefined;
   }
 
   // Negotiate a new one — ship must be docked, ideally at a marketplace/HQ. A
