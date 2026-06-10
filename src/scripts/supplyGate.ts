@@ -23,6 +23,8 @@ import type { Ship } from '../types/index.js';
  *   HAULER              ship symbol to dedicate (required)
  *   GATE                construction site waypoint (default X1-A20-I56)
  *   FLOOR               protected credit floor (default 2_000_000)
+ *   MATERIALS           comma list restricting which materials this hauler
+ *                       handles (default all); use to run one ship per material
  *   FAB_MATS_MARKET     source for FAB_MATS (default X1-A20-F48)
  *   ADV_CIRCUITRY_MARKET source for ADVANCED_CIRCUITRY (default X1-A20-D41)
  *   MAX_TRIPS           safety cap on buy->supply trips (default 0 = unlimited)
@@ -33,10 +35,22 @@ const GATE = process.env.GATE?.trim() || 'X1-A20-I56';
 const FLOOR = Number(process.env.FLOOR ?? 2_000_000);
 const MAX_TRIPS = Number(process.env.MAX_TRIPS ?? 0);
 
-const SOURCES: Record<string, string> = {
+const ALL_SOURCES: Record<string, string> = {
   FAB_MATS: process.env.FAB_MATS_MARKET?.trim() || 'X1-A20-F48',
   ADVANCED_CIRCUITRY: process.env.ADV_CIRCUITRY_MARKET?.trim() || 'X1-A20-D41',
 };
+
+// Optional MATERIALS env restricts this hauler to a subset of materials so
+// multiple haulers can run in parallel without racing (one ship per material).
+const MATERIALS = (process.env.MATERIALS ?? '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+const SOURCES: Record<string, string> = MATERIALS.length
+  ? Object.fromEntries(
+      Object.entries(ALL_SOURCES).filter(([good]) => MATERIALS.includes(good)),
+    )
+  : ALL_SOURCES;
 
 let stopping = false;
 process.on('SIGINT', () => {
