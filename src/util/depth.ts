@@ -17,8 +17,16 @@ import type { PriceRow } from '../state/repos.js';
 /**
  * Default number of sell-market depth "steps" a single buy may span. Shared by
  * the trader (execution cap) and route ranking (so scoring matches behavior).
+ *
+ * Held at 1: a market's `sellVolume` is how many units it absorbs at the quoted
+ * price; every step past the first pushes the realized sell price down a notch.
+ * For high per-unit goods (JEWELRY, ASSAULT_RIFLES, FOOD) even the second step
+ * can sink below the profit floor, stranding cargo at a loss — buying two or
+ * three steps repeatedly drained the wallet (JEWELRY -75.8k, FOOD ~-46k) before
+ * this was clamped. One step keeps each fill inside the depth the sink can clear
+ * near full price; deeper goods (sellVolume >= hold) still fill the whole bay.
  */
-export const DEFAULT_SELL_DEPTH_MULTIPLE = 3;
+export const DEFAULT_SELL_DEPTH_MULTIPLE = 1;
 
 /**
  * Split `total` units into a sequence of chunk sizes no larger than
@@ -93,6 +101,30 @@ export function depthCappedBuyUnits(
   const steps = Math.max(1, depthMultiple);
   const cap = Math.max(1, Math.floor(sellVolume * steps));
   return Math.min(freeCargo, cap);
+}
+
+/**
+ * Cap how many units to buy so a single buy->sell cycle can't commit more than
+ * `maxSpend` credits at the expected per-unit purchase price. Bounds per-trade
+ * capital at risk: without it, one trader (with REINVEST off) dumps the entire
+ * wallet into a single position, which both starves sibling traders of capital
+ * and turns one bad fill into a large realized loss.
+ *
+ * A non-positive `maxSpend` means "no budget cap". A non-positive/unknown
+ * `estPricePerUnit` is treated as "unknown cost" → no cap. When the budget can't
+ * afford even one unit the result is 0, signalling the caller to skip the route
+ * rather than force an unaffordable buy.
+ */
+export function budgetCappedBuyUnits(
+  units: number,
+  estPricePerUnit: number | null | undefined,
+  maxSpend: number | null | undefined,
+): number {
+  if (units <= 0) return 0;
+  if (!maxSpend || maxSpend <= 0) return units;
+  if (!estPricePerUnit || estPricePerUnit <= 0) return units;
+  const affordable = Math.floor(maxSpend / estPricePerUnit);
+  return Math.max(0, Math.min(units, affordable));
 }
 
 export interface HoldItem {

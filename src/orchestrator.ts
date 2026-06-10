@@ -68,6 +68,13 @@ export interface FleetRoundOptions {
    * the whole fleet waiting. 0 = unbounded (default).
    */
   roundBudgetMs?: number;
+  /**
+   * Fraction of the wallet a single trader may spend on one buy->sell cycle.
+   * Bounds per-trade capital at risk so one ship can't dump the whole wallet
+   * into a thin-sink position (the JEWELRY/FOOD saturation losses) and starve
+   * sibling traders of capital. 0 = unbounded (default).
+   */
+  maxTradeFraction?: number;
 }
 
 export interface FleetRoundResult {
@@ -113,6 +120,13 @@ export async function runFleetRound(
 
   const agent = await api.getMyAgent();
   const system = systemOf(agent.headquarters);
+
+  // Per-trade spend cap derived from the wallet at round start. Bounds how much
+  // capital any single trader can sink into one position (thin-sink saturation
+  // protection); 0 fraction disables the cap.
+  const maxTradeFraction = Math.max(0, opts.maxTradeFraction ?? 0);
+  const maxTradeSpend =
+    maxTradeFraction > 0 ? Math.max(0, Math.floor(agent.credits * maxTradeFraction)) : undefined;
 
   const ships = await hydrateShips(api);
   await hydrateSystemWaypoints(api, system);
@@ -303,6 +317,7 @@ export async function runFleetRound(
               cycles: tradeCycles,
               minProfit,
               avoidGoods: claimedGoods,
+              maxTradeSpend,
               shouldStop: roundExpired,
             });
             result.traderProfit += r.profit;
@@ -344,6 +359,7 @@ export async function runFleetRound(
         minProfit,
         assignedGood: assignedGoods[i],
         avoidGoods: [...assignedGoods.filter((_, j) => j !== i), ...crossGoods],
+        maxTradeSpend,
         shouldStop: roundExpired,
       }).then(
         (r) => {

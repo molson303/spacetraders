@@ -8,6 +8,8 @@ import {
   keepBuying,
   bestSellMarket,
   depthCappedBuyUnits,
+  budgetCappedBuyUnits,
+  DEFAULT_SELL_DEPTH_MULTIPLE,
   strandedGoods,
 } from '../util/depth.js';
 import type { PriceRow } from '../state/repos.js';
@@ -105,6 +107,42 @@ test('depthCappedBuyUnits clamps multiple to at least one step', () => {
 test('depthCappedBuyUnits returns 0 for a full hold', () => {
   assert.equal(depthCappedBuyUnits(0, 5, 3), 0);
   assert.equal(depthCappedBuyUnits(-2, 5, 3), 0);
+});
+
+test('DEFAULT_SELL_DEPTH_MULTIPLE is 1 (buy at most one sink step)', () => {
+  // The default must keep buys inside a single sell-step. A thin sink (20/step)
+  // and a full 40 hold should cap the buy at 20, not 40+, so a fill never floods
+  // the sink below the profit floor (the JEWELRY/FOOD saturation losses).
+  assert.equal(DEFAULT_SELL_DEPTH_MULTIPLE, 1);
+  assert.equal(depthCappedBuyUnits(40, 20, DEFAULT_SELL_DEPTH_MULTIPLE), 20);
+  // A sink at least as deep as the hold still fills the whole bay.
+  assert.equal(depthCappedBuyUnits(40, 40, DEFAULT_SELL_DEPTH_MULTIPLE), 40);
+});
+
+test('budgetCappedBuyUnits limits units to what the spend budget affords', () => {
+  // 60 units wanted at ~4000/u, but only 100k budget -> 25 units.
+  assert.equal(budgetCappedBuyUnits(60, 4000, 100000), 25);
+  // Budget comfortably covers the requested units -> unchanged.
+  assert.equal(budgetCappedBuyUnits(20, 100, 100000), 20);
+  // Budget can't afford even one unit -> 0 (caller skips the route).
+  assert.equal(budgetCappedBuyUnits(40, 5000, 1000), 0);
+});
+
+test('budgetCappedBuyUnits treats a non-positive budget as no cap', () => {
+  assert.equal(budgetCappedBuyUnits(40, 4000, 0), 40);
+  assert.equal(budgetCappedBuyUnits(40, 4000, null), 40);
+  assert.equal(budgetCappedBuyUnits(40, 4000, undefined), 40);
+});
+
+test('budgetCappedBuyUnits treats unknown unit price as no cap', () => {
+  assert.equal(budgetCappedBuyUnits(40, 0, 1000), 40);
+  assert.equal(budgetCappedBuyUnits(40, null, 1000), 40);
+  assert.equal(budgetCappedBuyUnits(40, undefined, 1000), 40);
+});
+
+test('budgetCappedBuyUnits returns 0 for a non-positive unit count', () => {
+  assert.equal(budgetCappedBuyUnits(0, 100, 1000), 0);
+  assert.equal(budgetCappedBuyUnits(-5, 100, 1000), 0);
 });
 
 test('strandedGoods returns held goods ordered by units descending', () => {

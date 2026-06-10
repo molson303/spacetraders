@@ -63,6 +63,7 @@ const CFG = {
   miners: Number(process.env.MINERS ?? 0),
   crossAntimatterCost: Number(process.env.CROSS_ANTIMATTER_COST ?? 0),
   roundBudgetMs: Number(process.env.ROUND_BUDGET_MS ?? 1_500_000),
+  maxTradeFraction: Number(process.env.MAX_TRADE_FRACTION ?? 0.25),
   reinvest: (process.env.REINVEST ?? '1') === '1',
   reserve: Number(process.env.RESERVE ?? 75000),
   maxShips: Number(process.env.MAX_SHIPS ?? 8),
@@ -111,7 +112,8 @@ async function main(): Promise<void> {
   log.info(
     `supervisor start | credits=${startAgent.credits} reinvest=${CFG.reinvest} ` +
       `reserve=${CFG.reserve} maxShips=${CFG.maxShips} maxRounds=${CFG.maxRounds || '∞'} ` +
-      `roundBudget=${CFG.roundBudgetMs ? Math.round(CFG.roundBudgetMs / 1000) + 's' : '∞'}`,
+      `roundBudget=${CFG.roundBudgetMs ? Math.round(CFG.roundBudgetMs / 1000) + 's' : '∞'} ` +
+      `maxTradeFraction=${CFG.maxTradeFraction || '∞'}`,
   );
 
   let round = 0;
@@ -131,6 +133,7 @@ async function main(): Promise<void> {
         miners: CFG.miners,
         crossAntimatterCost: CFG.crossAntimatterCost,
         roundBudgetMs: CFG.roundBudgetMs,
+        maxTradeFraction: CFG.maxTradeFraction,
       });
       const dt = Math.round((Date.now() - t0) / 1000);
       log.info(
