@@ -32,6 +32,12 @@ export interface PartitionOptions {
   crossShips?: number;
   /** Whether the largest earner is reserved as the contractor (default true). */
   enableContractor?: boolean;
+  /**
+   * Ship symbols to drop from every bucket — dedicated to an out-of-band job
+   * (e.g. feeding a factory's inputs or supplying the jump gate) so the trade
+   * fleet never fights over them. Mirrors the orchestrator's EXCLUDE_SHIPS.
+   */
+  excludeShips?: string[];
 }
 
 /** Descending by fuel, then cargo, then symbol — deterministic tiebreaks. */
@@ -60,8 +66,9 @@ function byHold(a: Ship, b: Ship): number {
 export function partitionFleet(ships: Ship[], opts: PartitionOptions = {}): FleetPartition {
   const crossShips = Math.max(0, opts.crossShips ?? 0);
   const enableContractor = opts.enableContractor ?? true;
+  const excluded = new Set(opts.excludeShips ?? []);
 
-  const earners = ships.filter(isEarner);
+  const earners = ships.filter((s) => isEarner(s) && !excluded.has(s.symbol));
   if (earners.length === 0) return { cross: [], local: [] };
 
   let contractor: Ship | undefined;

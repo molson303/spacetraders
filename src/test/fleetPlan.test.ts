@@ -118,3 +118,45 @@ test('a fleet of only probes yields empty buckets', () => {
   assert.deepEqual(part.cross, []);
   assert.deepEqual(part.local, []);
 });
+
+test('excludeShips drops the named earner from every bucket', () => {
+  const ships = [ship('BIG', 80, 300), ship('A', 40, 500), ship('B', 40, 400)];
+  const part = partitionFleet(ships, { crossShips: 1, excludeShips: ['A'] });
+  // BIG is still contractor; A is gone; B is the only pool ship -> goes to cross.
+  assert.equal(part.contractor?.symbol, 'BIG');
+  assert.deepEqual(
+    part.cross.map((s) => s.symbol),
+    ['B'],
+  );
+  // A appears in no bucket; B is the only pool ship -> cross.
+  assert.notEqual(part.contractor?.symbol, 'A');
+  assert.equal(part.cross.some((s) => s.symbol === 'A'), false);
+  assert.equal(part.local.some((s) => s.symbol === 'A'), false);
+  assert.equal(part.local.length, 0);
+});
+
+test('excluding the largest-hold ship reassigns the contractor', () => {
+  const ships = [ship('BIG', 80, 300), ship('MID', 60, 400), ship('SMALL', 40, 500)];
+  const part = partitionFleet(ships, { crossShips: 0, excludeShips: ['BIG'] });
+  // With BIG excluded, MID becomes the largest-hold contractor.
+  assert.equal(part.contractor?.symbol, 'MID');
+  assert.deepEqual(
+    part.local.map((s) => s.symbol),
+    ['SMALL'],
+  );
+});
+
+test('empty excludeShips is a no-op', () => {
+  const ships = [ship('BIG', 80, 300), ship('A', 40, 500)];
+  const base = partitionFleet(ships, { crossShips: 1 });
+  const excl = partitionFleet(ships, { crossShips: 1, excludeShips: [] });
+  assert.equal(excl.contractor?.symbol, base.contractor?.symbol);
+  assert.deepEqual(
+    excl.cross.map((s) => s.symbol),
+    base.cross.map((s) => s.symbol),
+  );
+  assert.deepEqual(
+    excl.local.map((s) => s.symbol),
+    base.local.map((s) => s.symbol),
+  );
+});

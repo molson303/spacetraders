@@ -25,6 +25,8 @@
  *   PROVISION_INTERVAL_MS  probe provisioning timer period (default 600000)
  *   STATS_INTERVAL_MS      per-fleet stats snapshot period (default 60000 = 1 min)
  *   IDLE_MS            pause for a ship that found no work this trip (default 15000)
+ *   EXCLUDE_SHIPS      comma list of ship symbols to drop from the trade fleet,
+ *                      dedicated to an out-of-band job (e.g. scripts/feedFactory.ts)
  */
 import 'dotenv/config';
 import { SpaceTradersApi } from './client/api.js';
@@ -96,6 +98,13 @@ const CFG = {
   repairThreshold: Number(process.env.REPAIR_THRESHOLD ?? 0.4),
   repairYard: process.env.REPAIR_YARD?.trim() || process.env.REINVEST_YARD?.trim() || undefined,
   repairEnabled: (process.env.REPAIR ?? '1') === '1',
+  // Ship symbols dropped from the trade fleet — dedicated to an out-of-band job
+  // (e.g. feeding F48's inputs via scripts/feedFactory.ts) so the continuous
+  // fleet never claims them. Mirrors the orchestrator's EXCLUDE_SHIPS.
+  excludeShips: (process.env.EXCLUDE_SHIPS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
 };
 
 let stopping = false;
@@ -128,7 +137,8 @@ async function main(): Promise<void> {
   const baseline = agent.credits;
   log.info(
     `fleet start | credits=${baseline} system=${system} crossShips=${CFG.crossShips} ` +
-      `contractor=${CFG.contractor} maxShips=${CFG.maxShips} maxTradeFraction=${CFG.maxTradeFraction}`,
+      `contractor=${CFG.contractor} maxShips=${CFG.maxShips} maxTradeFraction=${CFG.maxTradeFraction}` +
+      (CFG.excludeShips.length ? ` excludeShips=[${CFG.excludeShips.join(', ')}]` : ''),
   );
 
   // Hydrate the world once up front; probes + the provisioning timer keep prices
@@ -246,6 +256,7 @@ async function main(): Promise<void> {
     const part = partitionFleet(ships, {
       crossShips: CFG.crossShips,
       enableContractor: CFG.contractor,
+      excludeShips: CFG.excludeShips,
     });
     if (part.contractor) launch(part.contractor, 'contractor');
     for (const s of part.cross) launch(s, 'cross');
