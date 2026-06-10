@@ -45,18 +45,24 @@ import {
   getWaypointRow,
   isWaypointUnderConstruction,
 } from './state/repos.js';
+import { kvGet } from './state/kv.js';
 import { distance } from './util/nav.js';
 import { findJumpPath } from './util/jumpPath.js';
 import { ClaimRegistry } from './coordinator/claimRegistry.js';
 import { partitionFleet } from './coordinator/fleetPlan.js';
 import { runShipAgent, type ShipAgentDeps, type ShipRole, type TripKind } from './agents/shipAgent.js';
+import { runProbeAgent, type ProbeCycleDeps } from './agents/probeAgent.js';
 import { runRoute, scanHere, drainStrandedCargo } from './behaviors/trader.js';
 import { runRemoteTrade } from './behaviors/remoteTrader.js';
 import { runContractPipeline } from './behaviors/contractPipeline.js';
+import { runStationKeeping } from './behaviors/stationKeeper.js';
+import { runRemoteScout } from './behaviors/remoteScout.js';
+import { runScanner } from './behaviors/scanner.js';
 import { maybeReinvest, maybeProvisionProbes, type MaintenanceConfig } from './fleet/maintenance.js';
 import { sleep } from './client/rateLimiter.js';
 import { log } from './util/logger.js';
 import type { CrossSystemRoute } from './util/crossRoutes.js';
+import type { StationAssignment } from './util/stations.js';
 import type { Ship } from './types/index.js';
 
 const CFG = {
@@ -67,6 +73,9 @@ const CFG = {
   crossAntimatterCost: Number(process.env.CROSS_ANTIMATTER_COST ?? 0),
   reinvestIntervalMs: Number(process.env.REINVEST_INTERVAL_MS ?? 600_000),
   provisionIntervalMs: Number(process.env.PROVISION_INTERVAL_MS ?? 600_000),
+  probeIntervalMs: Number(process.env.PROBE_INTERVAL_MS ?? 120_000),
+  scanLimit: Number(process.env.SCAN_LIMIT ?? 20),
+  scanBudgetMs: Number(process.env.SCAN_BUDGET_MS ?? 120_000),
   statsIntervalMs: Number(process.env.STATS_INTERVAL_MS ?? 60_000),
   idleMs: Number(process.env.IDLE_MS ?? 15_000),
   // Shared maintenance config (mirrors supervisor.ts env names).
@@ -221,6 +230,26 @@ async function main(): Promise<void> {
 
   await syncAgents();
 
+  // ---- Probe fleet -------------------------------------------------------
+  // Stationed probes keep the market price map fresh; flex probes scout neighbor
+  // systems to seed the cross-gate source. Runs as one perpetual agent on its
+  // own interval, parallel to the trade agents.
+  const probeDeps: ProbeCycleDeps = {
+    listScouts: async () => (await api.listShips()).data.filter((s) => s.fuel.capacity === 0),
+    getStations: () => kvGet<StationAssignment[]>('probe_stations') ?? [],
+    stationKeep: (probes, stationed, allowCross) =>
+      runStationKeeping(api, probes, stationed, { allowCrossSystem: allowCross }),
+    remoteScout: (ship) => runRemoteScout(api, ship, system, { budgetMs: CFG.scanBudgetMs }),
+    scan: (ship) => runScanner(api, ship, system, { limit: CFG.scanLimit, budgetMs: CFG.scanBudgetMs }),
+    refetchShip: (sym) => api.getShip(sym),
+    gateOpen,
+  };
+  const probeJob = runProbeAgent(probeDeps, {
+    intervalMs: CFG.probeIntervalMs,
+    stopping: () => stopping,
+    delay: (ms) => sleep(ms),
+  });
+
   const cfg: MaintenanceConfig = {
     reinvest: CFG.reinvest,
     reserve: CFG.reserve,
@@ -267,7 +296,7 @@ async function main(): Promise<void> {
 
   log.info('draining: waiting for in-flight trips to finish...');
   for (const t of timers) clearInterval(t);
-  await Promise.allSettled(agentJobs);
+  await Promise.allSettled([...agentJobs, probeJob]);
 
   const finalCredits = (await api.getMyAgent()).credits;
   log.info(
