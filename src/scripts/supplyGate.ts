@@ -4,6 +4,7 @@ import { closeDb } from '../state/db.js';
 import { log } from '../util/logger.js';
 import { navigateTo, ensureDocked } from '../util/nav.js';
 import { systemOf } from '../state/world.js';
+import { getLatestPrice } from '../state/repos.js';
 import { remainingMaterials, planSupplyBatch, purchaseChunks } from '../fleet/gateSupply.js';
 import type { Ship } from '../types/index.js';
 
@@ -143,15 +144,31 @@ async function main(): Promise<void> {
     const agent = await api.getMyAgent();
     const cargoSpace = ship.cargo.capacity - ship.cargo.units;
 
-    // Pick the first material we can both afford and fit; track why we skip.
+    // Pick the first material we can afford and fit. A market's live price and
+    // trade volume are only readable once one of our ships is present there, so
+    // we estimate affordability from the last-known DB price, travel to the
+    // source, then confirm against the live market after docking.
     let acted = false;
     for (const mat of remaining) {
       const source = SOURCES[mat.tradeSymbol];
       if (!source) continue;
+      const estPrice = getLatestPrice(source, mat.tradeSymbol)?.purchase_price ?? 0;
+      const estUnits = planSupplyBatch({
+        remaining: mat.remaining,
+        cargoSpace,
+        credits: agent.credits,
+        floor: FLOOR,
+        pricePerUnit: estPrice || 1,
+      });
+      if (estUnits <= 0) continue; // can't afford this one (estimate) — try next
+
+      // Travel to the source and read the live market now that we're present.
+      ship = await navigateTo(api, ship, source);
+      ship = await ensureDocked(api, ship);
       const market = await api.getMarket(system, source);
       const good = market.tradeGoods?.find((g) => g.symbol === mat.tradeSymbol);
       if (!good) {
-        log.warn(`gate-supply: ${source} no longer sells ${mat.tradeSymbol}; skipping`);
+        log.warn(`gate-supply: ${source} does not sell ${mat.tradeSymbol} (docked); skipping`);
         continue;
       }
       const units = planSupplyBatch({
@@ -161,14 +178,12 @@ async function main(): Promise<void> {
         floor: FLOOR,
         pricePerUnit: good.purchasePrice,
       });
-      if (units <= 0) continue; // can't afford / no space for this one — try next
+      if (units <= 0) continue; // price spiked above floor — try next
 
       log.info(
         `gate-supply: buying ${units} ${mat.tradeSymbol} @~${good.purchasePrice} from ${source} ` +
           `(need ${mat.remaining}, credits ${agent.credits})`,
       );
-      ship = await navigateTo(api, ship, source);
-      ship = await ensureDocked(api, ship);
       for (const chunk of purchaseChunks(units, good.tradeVolume)) {
         if (stopping) break;
         const r = await api.purchaseCargo(ship.symbol, mat.tradeSymbol, chunk);
