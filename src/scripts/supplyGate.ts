@@ -5,7 +5,12 @@ import { log } from '../util/logger.js';
 import { navigateTo, ensureDocked } from '../util/nav.js';
 import { systemOf } from '../state/world.js';
 import { getLatestPrice } from '../state/repos.js';
-import { remainingMaterials, planSupplyBatch, purchaseChunks } from '../fleet/gateSupply.js';
+import {
+  remainingMaterials,
+  planSupplyBatch,
+  purchaseChunks,
+  priceWithinBand,
+} from '../fleet/gateSupply.js';
 import type { Ship } from '../types/index.js';
 
 /*
@@ -29,12 +34,21 @@ import type { Ship } from '../types/index.js';
  *   FAB_MATS_MARKET     source for FAB_MATS (default X1-A20-F48)
  *   ADV_CIRCUITRY_MARKET source for ADVANCED_CIRCUITRY (default X1-A20-D41)
  *   MAX_TRIPS           safety cap on buy->supply trips (default 0 = unlimited)
+ *   MAX_PRICE           max unit purchase price to pay for any material
+ *                       (default unlimited). When the live price exceeds this,
+ *                       the hauler waits and re-checks instead of buying — this
+ *                       prevents draining a supply-priced market into a price
+ *                       spiral. Use to only buy while the market is cheap.
+ *   WAIT_SECONDS        poll interval while waiting for price to fall back into
+ *                       band (default 120)
  */
 
 const HAULER = process.env.HAULER?.trim();
 const GATE = process.env.GATE?.trim() || 'X1-A20-I56';
 const FLOOR = Number(process.env.FLOOR ?? 2_000_000);
 const MAX_TRIPS = Number(process.env.MAX_TRIPS ?? 0);
+const MAX_PRICE = Number(process.env.MAX_PRICE ?? Number.POSITIVE_INFINITY);
+const WAIT_SECONDS = Number(process.env.WAIT_SECONDS ?? 120);
 
 const ALL_SOURCES: Record<string, string> = {
   FAB_MATS: process.env.FAB_MATS_MARKET?.trim() || 'X1-A20-F48',
@@ -58,6 +72,13 @@ process.on('SIGINT', () => {
   log.warn('SIGINT — finishing current step then exiting');
   stopping = true;
 });
+
+/** Sleep `seconds`, waking early if a stop has been requested. */
+async function interruptibleSleep(seconds: number): Promise<void> {
+  for (let i = 0; i < seconds && !stopping; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
 
 /** Units of a specific good currently held by the ship. */
 function heldUnits(ship: Ship, good: string): number {
@@ -149,10 +170,17 @@ async function main(): Promise<void> {
     // we estimate affordability from the last-known DB price, travel to the
     // source, then confirm against the live market after docking.
     let acted = false;
+    let priceBlocked = false;
     for (const mat of remaining) {
       const source = SOURCES[mat.tradeSymbol];
       if (!source) continue;
       const estPrice = getLatestPrice(source, mat.tradeSymbol)?.purchase_price ?? 0;
+      // Skip the trip entirely when the last-known price is already above the
+      // cap — no point burning fuel to confirm a spiked market.
+      if (estPrice > 0 && !priceWithinBand(estPrice, 0, MAX_PRICE)) {
+        priceBlocked = true;
+        continue;
+      }
       const estUnits = planSupplyBatch({
         remaining: mat.remaining,
         cargoSpace,
@@ -169,6 +197,16 @@ async function main(): Promise<void> {
       const good = market.tradeGoods?.find((g) => g.symbol === mat.tradeSymbol);
       if (!good) {
         log.warn(`gate-supply: ${source} does not sell ${mat.tradeSymbol} (docked); skipping`);
+        continue;
+      }
+      // Hard price cap against the live price: refuse to buy above MAX_PRICE and
+      // wait for the market to recover instead (prevents a price spiral).
+      if (!priceWithinBand(good.purchasePrice, 0, MAX_PRICE)) {
+        log.info(
+          `gate-supply: ${mat.tradeSymbol} @${good.purchasePrice} at ${source} exceeds MAX_PRICE ` +
+            `${MAX_PRICE}; not buying — waiting for recovery`,
+        );
+        priceBlocked = true;
         continue;
       }
       const units = planSupplyBatch({
@@ -196,6 +234,16 @@ async function main(): Promise<void> {
     }
 
     if (!acted) {
+      // Distinguish "too expensive right now" (wait & retry — the market
+      // recovers over time) from "out of money" (pause for a later rerun).
+      if (priceBlocked && !stopping) {
+        log.info(
+          `gate-supply: all available material above MAX_PRICE=${MAX_PRICE}; ` +
+            `re-checking in ${WAIT_SECONDS}s`,
+        );
+        await interruptibleSleep(WAIT_SECONDS);
+        continue;
+      }
       log.warn(
         `gate-supply: floor reached — cannot afford any remaining material above ${FLOOR}cr. ` +
           `Pausing; rerun after more earnings.`,

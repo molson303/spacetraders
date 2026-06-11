@@ -5,6 +5,7 @@ import {
   affordableUnits,
   planSupplyBatch,
   purchaseChunks,
+  priceWithinBand,
 } from '../fleet/gateSupply.js';
 import type { Construction } from '../types/index.js';
 
@@ -93,4 +94,28 @@ test('purchaseChunks splits by trade volume', () => {
 test('purchaseChunks handles edge cases', () => {
   assert.deepEqual(purchaseChunks(0, 20), []);
   assert.deepEqual(purchaseChunks(40, 0), [40]); // non-positive volume -> single chunk
+});
+
+test('priceWithinBand enforces an upper cap (no lower bound by default)', () => {
+  // only-buy-when-cheap: cap at 1300, no floor
+  assert.equal(priceWithinBand(988, 0, 1300), true);
+  assert.equal(priceWithinBand(1300, 0, 1300), true); // inclusive
+  assert.equal(priceWithinBand(1301, 0, 1300), false);
+  assert.equal(priceWithinBand(5740, 0, 1300), false); // spiked price refused
+  assert.equal(priceWithinBand(1, 0, 1300), true); // any cheap price ok
+});
+
+test('priceWithinBand treats non-positive/unknown prices as out of band', () => {
+  assert.equal(priceWithinBand(0, 0, 1300), false);
+  assert.equal(priceWithinBand(-5, 0, 1300), false);
+});
+
+test('priceWithinBand defaults are permissive (any positive price)', () => {
+  assert.equal(priceWithinBand(999999), true);
+  assert.equal(priceWithinBand(0), false);
+});
+
+test('priceWithinBand also supports a lower bound when given', () => {
+  assert.equal(priceWithinBand(850, 900, 1300), false);
+  assert.equal(priceWithinBand(900, 900, 1300), true);
 });

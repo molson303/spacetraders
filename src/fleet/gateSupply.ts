@@ -55,6 +55,22 @@ export function planSupplyBatch(input: SupplyBatchInput): number {
 }
 
 /**
+ * Whether a unit price is within the acceptable purchase band [minPrice,
+ * maxPrice]. Used to refuse buys when a supply-priced good has spiked (price
+ * too high) — the hauler waits for the market to recover instead of paying a
+ * spiked price. A non-positive price is never in band (unknown/invalid).
+ * Defaults are permissive (any positive price) so callers opt in.
+ */
+export function priceWithinBand(
+  price: number,
+  minPrice = 0,
+  maxPrice = Number.POSITIVE_INFINITY,
+): boolean {
+  if (price <= 0) return false;
+  return price >= minPrice && price <= maxPrice;
+}
+
+/**
  * Split a desired unit count into market-trade-volume-sized purchase chunks
  * (e.g. 80 units with volume 20 -> [20, 20, 20, 20]). Each chunk is one
  * purchaseCargo call. A non-positive volume falls back to a single chunk.
