@@ -257,6 +257,30 @@ export function recordTransaction(t: TxnRecord): void {
 
 // ---------- Query helpers ----------
 
+/**
+ * Recent transaction counts per waypoint within a system, used to rank which
+ * markets most deserve a stationed price probe — a busier market's spread goes
+ * stale (and causes wasted "bought nothing" trips) sooner than a quiet one. Only
+ * the last `sinceDays` of activity is counted so placement tracks current trade
+ * patterns rather than ancient history. Joined to `waypoints` so only markets in
+ * the given system are returned. Waypoints with no recent activity are simply
+ * absent from the map (callers treat a miss as 0).
+ */
+export function countTransactionsByWaypoint(system: string, sinceDays = 7): Map<string, number> {
+  const rows = getDb()
+    .prepare(
+      `SELECT t.waypoint AS waypoint, COUNT(*) AS n
+         FROM transactions t
+         JOIN waypoints w ON w.symbol = t.waypoint
+        WHERE w.system = ?
+          AND t.waypoint IS NOT NULL
+          AND t.observed_at >= datetime('now', ?)
+        GROUP BY t.waypoint`,
+    )
+    .all(system, `-${sinceDays} days`) as { waypoint: string; n: number }[];
+  return new Map(rows.map((r) => [r.waypoint, r.n]));
+}
+
 export interface WaypointRow {
   symbol: string;
   system: string;

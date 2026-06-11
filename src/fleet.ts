@@ -105,6 +105,13 @@ const CFG = {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),
+  // Waypoints always given a stationed probe regardless of trade volume (e.g.
+  // the factory we feed). The under-construction home gate is auto-pinned too.
+  strategicMarkets: (process.env.STRATEGIC_MARKETS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
+  stationTxWindowDays: Number(process.env.STATION_TX_WINDOW_DAYS ?? 7),
 };
 
 let stopping = false;
@@ -303,6 +310,8 @@ async function main(): Promise<void> {
     repair: false, // continuous repair is a mid-loop self-divert (Phase 5), not a timer
     repairThreshold: 0,
     repairYard: undefined,
+    strategicMarkets: CFG.strategicMarkets,
+    stationTxWindowDays: CFG.stationTxWindowDays,
     stopping: () => stopping,
   };
 

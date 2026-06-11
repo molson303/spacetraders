@@ -14,6 +14,7 @@ import { purchaseShipAt } from '../behaviors/fleet.js';
 import { maybeRepair, needsRepair } from '../behaviors/maintenance.js';
 import { scanShipyard, systemOf } from '../state/world.js';
 import {
+  countTransactionsByWaypoint,
   findArbitrageRoutes,
   findJumpGatesBySystem,
   findShipyardsSellingShipType,
@@ -27,6 +28,7 @@ import { travelTo } from '../util/nav.js';
 import { bestReinvestShip, earnWeight, reinvestEarnerHeadroom } from '../util/reinvest.js';
 import { countDistinctRoutes } from '../util/routes.js';
 import {
+  marketPriority,
   planProbeStations,
   probesToProvision,
   type StationAssignment,
@@ -49,6 +51,14 @@ export interface MaintenanceConfig {
   repair: boolean;
   repairThreshold: number;
   repairYard: string | undefined;
+  /**
+   * Waypoints pinned to always get a stationed probe regardless of trade volume
+   * (e.g. the factory we feed for the endgame). The home jump gate, while under
+   * construction, is auto-pinned on top of these. Defaults to none.
+   */
+  strategicMarkets?: string[];
+  /** Days of transaction history used to rank market importance. Default 7. */
+  stationTxWindowDays?: number;
   /** Cooperative stop signal — the repair loop bails between ships when true. */
   stopping: () => boolean;
 }
@@ -78,20 +88,31 @@ function coordsOf(symbol: string): { x: number; y: number } | undefined {
 }
 
 /**
- * Marketplaces eligible for a stationed probe. Home-system markets always
- * qualify (priority 1). When the home jump gate is operational, hydrated markets
- * in directly-connected neighbor systems are included (priority 0); while the
+ * Marketplaces eligible for a stationed probe, each tagged with a stationing
+ * priority. Home-system markets are ranked by recent trade volume (busier
+ * markets get a probe first) with strategic markets — operator-pinned waypoints
+ * plus the home jump gate while it is under construction — floated to the top so
+ * they are always covered. When the home gate is operational, hydrated markets
+ * in directly-connected neighbor systems are appended at priority 0; while the
  * gate is under construction only home markets are returned.
  */
-function gatherStationMarkets(system: string): StationMarket[] {
+export function gatherStationMarkets(
+  system: string,
+  inputs: { txCounts?: Map<string, number>; strategic?: Set<string> } = {},
+): StationMarket[] {
+  const strategic = new Set(inputs.strategic ?? []);
+  const homeGate = findJumpGatesBySystem(system)[0];
+  const gateBlocked = homeGate ? isWaypointUnderConstruction(homeGate.symbol) : true;
+  // We actively supply the home gate while it is under construction, so pin it
+  // as strategic; once built it falls back to ordinary trade-volume ranking.
+  if (homeGate && gateBlocked) strategic.add(homeGate.symbol);
+
   const home: StationMarket[] = findWaypointsByTrait(system, 'MARKETPLACE').map((w) => ({
     symbol: w.symbol,
     system: w.system,
-    priority: 1,
+    priority: marketPriority(w.symbol, { txCounts: inputs.txCounts, strategic }),
   }));
 
-  const homeGate = findJumpGatesBySystem(system)[0];
-  const gateBlocked = homeGate ? isWaypointUnderConstruction(homeGate.symbol) : true;
   if (!homeGate || gateBlocked) return home;
 
   const neighborSystems = new Set(
@@ -196,85 +217,96 @@ export async function maybeReinvest(api: SpaceTradersApi, cfg: MaintenanceConfig
 }
 
 /**
- * Provision and station market-data probes. When MAX_PROBES > 0, buys fuel-free
- * probes up to one per eligible marketplace, then assigns every probe to a market
- * and persists the plan so the station keeper refreshes prices in place. Returns
- * the number of probes bought.
+ * Provision and station market-data probes. Always re-plans station assignments
+ * over the current probes (so a priority change or a newly-charted market
+ * re-homes probes even when not buying), and additionally — when MAX_PROBES > 0
+ * and budget allows — buys fuel-free probes toward one per eligible marketplace.
+ * Returns the number of probes bought.
  */
 export async function maybeProvisionProbes(
   api: SpaceTradersApi,
   cfg: MaintenanceConfig,
 ): Promise<number> {
-  if (cfg.maxProbes <= 0) return 0;
   let agent = await api.getMyAgent();
   let fleet = (await api.listShips()).data;
   const system = systemOf(agent.headquarters);
 
   const isProbe = (s: { fuel: { capacity: number } }): boolean => s.fuel.capacity === 0;
-  const markets: StationMarket[] = gatherStationMarkets(system);
+  // Rank markets by recent trade volume, pinning operator-chosen strategic
+  // waypoints (and the under-construction home gate) to the top.
+  const txCounts = countTransactionsByWaypoint(system, cfg.stationTxWindowDays ?? 7);
+  const strategic = new Set(cfg.strategicMarkets ?? []);
+  const markets: StationMarket[] = gatherStationMarkets(system, { txCounts, strategic });
   if (markets.length === 0) return 0;
 
   const existing = kvGet<StationAssignment[]>('probe_stations') ?? [];
   const probes = fleet.filter(isProbe);
-  const stationedNow = planProbeStations(
-    markets,
-    probes.map((p) => ({ symbol: p.symbol })),
-    existing,
-  ).length;
-  const buyCount = probesToProvision({
-    marketCount: markets.length,
-    stationed: stationedNow,
-    currentProbes: probes.length,
-    maxProbes: cfg.maxProbes,
-    budget: agent.credits - cfg.reserve,
-    probePrice: cfg.probeCostEst,
-  });
 
+  // Buy more probes only when provisioning is enabled and budget/cap allow.
   let bought = 0;
-  if (buyCount > 0) {
-    let ferry = probes[0] ?? fleet[0]!;
-    const candidates: ShipyardCandidate[] = findWaypointsByTrait(system, 'SHIPYARD').map((w) => ({
-      symbol: w.symbol,
-      x: w.x,
-      y: w.y,
-    }));
-    const sellers = new Set(
-      findShipyardsSellingShipType(system, 'SHIP_PROBE').map((s) => s.symbol),
-    );
-    const ordered = orderShipyardsForPurchase(candidates, sellers, {
-      override: cfg.reinvestYard,
-      from: coordsOf(ferry.nav.waypointSymbol) ?? coordsOf(agent.headquarters),
+  if (cfg.maxProbes > 0) {
+    const stationedNow = planProbeStations(
+      markets,
+      probes.map((p) => ({ symbol: p.symbol })),
+      existing,
+    ).length;
+    const buyCount = probesToProvision({
+      marketCount: markets.length,
+      stationed: stationedNow,
+      currentProbes: probes.length,
+      maxProbes: cfg.maxProbes,
+      budget: agent.credits - cfg.reserve,
+      probePrice: cfg.probeCostEst,
     });
-    if (ordered.length === 0) {
-      log.info(`provision: no shipyard found in ${system}; skipping buy`);
-    } else {
-      for (const yardSymbol of ordered) {
-        if (bought >= buyCount) break;
-        if (ferry.nav.waypointSymbol !== yardSymbol) ferry = await travelTo(api, ferry, yardSymbol);
-        let soldHere = false;
-        while (bought < buyCount) {
-          const yard = await scanShipyard(api, system, yardSymbol);
-          const offer = (yard.ships ?? []).find((s) => s.type === 'SHIP_PROBE');
-          if (!offer) break;
-          soldHere = true; // this yard stocks probes; don't wander to others
-          if (agent.credits - cfg.reserve < offer.purchasePrice) break;
-          const res = await purchaseShipAt(api, 'SHIP_PROBE' as ShipType, yardSymbol, {
-            maxPrice: offer.purchasePrice + cfg.reserve,
-          });
-          if (!res.ship) break;
-          bought++;
-          agent = { ...agent, credits: res.credits };
+
+    if (buyCount > 0) {
+      let ferry = probes[0] ?? fleet[0]!;
+      const candidates: ShipyardCandidate[] = findWaypointsByTrait(system, 'SHIPYARD').map((w) => ({
+        symbol: w.symbol,
+        x: w.x,
+        y: w.y,
+      }));
+      const sellers = new Set(
+        findShipyardsSellingShipType(system, 'SHIP_PROBE').map((s) => s.symbol),
+      );
+      const ordered = orderShipyardsForPurchase(candidates, sellers, {
+        override: cfg.reinvestYard,
+        from: coordsOf(ferry.nav.waypointSymbol) ?? coordsOf(agent.headquarters),
+      });
+      if (ordered.length === 0) {
+        log.info(`provision: no shipyard found in ${system}; skipping buy`);
+      } else {
+        for (const yardSymbol of ordered) {
+          if (bought >= buyCount) break;
+          if (ferry.nav.waypointSymbol !== yardSymbol) ferry = await travelTo(api, ferry, yardSymbol);
+          let soldHere = false;
+          while (bought < buyCount) {
+            const yard = await scanShipyard(api, system, yardSymbol);
+            const offer = (yard.ships ?? []).find((s) => s.type === 'SHIP_PROBE');
+            if (!offer) break;
+            soldHere = true; // this yard stocks probes; don't wander to others
+            if (agent.credits - cfg.reserve < offer.purchasePrice) break;
+            const res = await purchaseShipAt(api, 'SHIP_PROBE' as ShipType, yardSymbol, {
+              maxPrice: offer.purchasePrice + cfg.reserve,
+            });
+            if (!res.ship) break;
+            bought++;
+            agent = { ...agent, credits: res.credits };
+          }
+          if (soldHere) break;
+          log.info(`provision: ${yardSymbol} does not sell SHIP_PROBE; trying next yard`);
         }
-        if (soldHere) break;
-        log.info(`provision: ${yardSymbol} does not sell SHIP_PROBE; trying next yard`);
+        if (bought > 0) log.info(`provision: bought ${bought} probe(s) this cycle`);
       }
-      if (bought > 0) log.info(`provision: bought ${bought} probe(s) this cycle`);
     }
   }
 
-  // Re-plan over ALL current probes (including any just bought) and persist.
+  // Re-plan over ALL current probes (including any just bought) and persist, so
+  // station-keeping relocates probes to the highest-priority markets even when
+  // we're not buying.
   if (bought > 0) fleet = (await api.listShips()).data;
   const allProbes = fleet.filter(isProbe).map((p) => ({ symbol: p.symbol }));
+  if (allProbes.length === 0) return bought;
   const plan = planProbeStations(markets, allProbes, existing);
   kvSet('probe_stations', plan);
   log.info(

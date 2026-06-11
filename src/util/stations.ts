@@ -39,13 +39,45 @@ function orderMarkets(markets: StationMarket[]): StationMarket[] {
   );
 }
 
+/** Priority pinned onto strategic markets — far above any plausible tx count. */
+export const STRATEGIC_PRIORITY = 1_000_000;
+
+/** Inputs for {@link marketPriority}: trade-volume signal and strategic pins. */
+export interface MarketPriorityInputs {
+  /** Recent transaction count per waypoint; busier markets rank higher. */
+  txCounts?: Map<string, number>;
+  /** Waypoints pinned above all traffic-ranked markets (factory, active gate). */
+  strategic?: Set<string>;
+}
+
+/**
+ * Stationing priority for a home-system market. Strategic markets (e.g. the
+ * factory we feed, the jump gate under construction) are pinned at
+ * {@link STRATEGIC_PRIORITY} so they are always covered. Every other market
+ * ranks by recent transaction count — busier markets earn a probe first — offset
+ * by 1 so even an untraded home market still outranks a cross-system neighbor
+ * (priority 0). Higher = more important.
+ */
+export function marketPriority(symbol: string, inputs: MarketPriorityInputs = {}): number {
+  if (inputs.strategic?.has(symbol)) return STRATEGIC_PRIORITY;
+  return 1 + (inputs.txCounts?.get(symbol) ?? 0);
+}
+
 /**
  * Assign probes to markets, preserving any still-valid existing assignments and
  * filling uncovered markets (priority-first) with free probes. An existing
  * assignment is retained only when its probe still exists and its market is
  * still in the candidate set; otherwise the probe is freed for reassignment.
  * Deterministic: free probes are consumed in symbol order against markets in
- * priority order. Returns the full assignment list.
+ * priority order.
+ *
+ * When probes are scarcer than markets, a final rebalance pass re-homes probes
+ * sitting on low-priority markets onto any higher-priority market still
+ * uncovered — so a priority change (a market's trade volume rising, or a new
+ * strategic pin) actually moves a stationed probe instead of being ignored by
+ * retention. After it runs, no uncovered market outranks any covered one (i.e.
+ * the highest-priority markets the probe count can cover are covered). Returns
+ * the full assignment list.
  */
 export function planProbeStations(
   markets: StationMarket[],
@@ -54,6 +86,7 @@ export function planProbeStations(
 ): StationAssignment[] {
   const probeSet = new Set(probes.map((p) => p.symbol));
   const marketSet = new Set(markets.map((m) => m.symbol));
+  const priorityOf = new Map(markets.map((m) => [m.symbol, m.priority ?? 0]));
 
   // Retain existing assignments whose probe and market both still exist.
   const retained = existing.filter(
@@ -69,9 +102,49 @@ export function planProbeStations(
   const uncovered = orderMarkets(markets).filter((m) => !coveredMarkets.has(m.symbol));
 
   const assignments = [...retained];
-  for (let i = 0; i < uncovered.length && i < freeProbes.length; i++) {
-    assignments.push({ ship: freeProbes[i]!, waypoint: uncovered[i]!.symbol });
+  let fi = 0;
+  for (let i = 0; i < uncovered.length && fi < freeProbes.length; i++) {
+    assignments.push({ ship: freeProbes[fi++]!, waypoint: uncovered[i]!.symbol });
+    coveredMarkets.add(uncovered[i]!.symbol);
   }
+
+  // Rebalance: while a higher-priority market sits uncovered, evict the probe on
+  // the lowest-priority covered market and move it there. Each swap strictly
+  // raises covered priority so the loop terminates; ties break by symbol for
+  // determinism. No swap happens when every uncovered market is <= every covered
+  // one, which preserves churn-free retention among equal-priority markets.
+  for (;;) {
+    let target: StationMarket | undefined;
+    for (const m of markets) {
+      if (coveredMarkets.has(m.symbol)) continue;
+      if (
+        !target ||
+        (m.priority ?? 0) > (target.priority ?? 0) ||
+        ((m.priority ?? 0) === (target.priority ?? 0) && m.symbol.localeCompare(target.symbol) < 0)
+      ) {
+        target = m;
+      }
+    }
+    if (!target) break;
+
+    let victimIdx = -1;
+    let victimPriority = Infinity;
+    let victimWaypoint = '';
+    assignments.forEach((a, i) => {
+      const p = priorityOf.get(a.waypoint) ?? 0;
+      if (p < victimPriority || (p === victimPriority && a.waypoint.localeCompare(victimWaypoint) < 0)) {
+        victimIdx = i;
+        victimPriority = p;
+        victimWaypoint = a.waypoint;
+      }
+    });
+    if (victimIdx < 0 || (target.priority ?? 0) <= victimPriority) break;
+
+    coveredMarkets.delete(assignments[victimIdx]!.waypoint);
+    assignments[victimIdx] = { ship: assignments[victimIdx]!.ship, waypoint: target.symbol };
+    coveredMarkets.add(target.symbol);
+  }
+
   return assignments;
 }
 
