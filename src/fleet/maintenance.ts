@@ -32,6 +32,7 @@ import {
   neighborMarketPriority,
   planProbeStations,
   probesToProvision,
+  reserveScoutProbes,
   type StationAssignment,
   type StationMarket,
 } from '../util/stations.js';
@@ -51,6 +52,13 @@ export interface MaintenanceConfig {
    * the budget throttle the spend. Defaults to no cap when omitted.
    */
   maxProbesPerCycle?: number;
+  /**
+   * Probes held back from stationing as a permanent flex pool for remote
+   * scouting, so neighbor discovery continues even when markets outnumber
+   * probes. Defaults to 0 (no reserve). The probe buy target is raised by this
+   * count so full market coverage and an active scout can coexist.
+   */
+  scoutProbes?: number;
   probeCostEst: number;
   minProfit: number;
   reinvestYard: string | undefined;
@@ -270,17 +278,23 @@ export async function maybeProvisionProbes(
 
   const existing = kvGet<StationAssignment[]>('probe_stations') ?? [];
   const probes = fleet.filter(isProbe);
+  const scoutReserve = Math.max(0, cfg.scoutProbes ?? 0);
 
   // Buy more probes only when provisioning is enabled and budget/cap allow.
   let bought = 0;
   if (cfg.maxProbes > 0) {
     const stationedNow = planProbeStations(
       markets,
-      probes.map((p) => ({ symbol: p.symbol })),
+      reserveScoutProbes(
+        probes.map((p) => ({ symbol: p.symbol })),
+        scoutReserve,
+      ).stationable,
       existing,
     ).length;
     const buyCount = probesToProvision({
-      marketCount: markets.length,
+      // Target full market coverage plus the scout reserve, so covering every
+      // market doesn't starve discovery (and vice-versa).
+      marketCount: markets.length + scoutReserve,
       stationed: stationedNow,
       currentProbes: probes.length,
       maxProbes: cfg.maxProbes,
@@ -337,10 +351,12 @@ export async function maybeProvisionProbes(
   if (bought > 0) fleet = await api.listAllShips();
   const allProbes = fleet.filter(isProbe).map((p) => ({ symbol: p.symbol }));
   if (allProbes.length === 0) return bought;
-  const plan = planProbeStations(markets, allProbes, existing);
+  const { stationable, reserved } = reserveScoutProbes(allProbes, scoutReserve);
+  const plan = planProbeStations(markets, stationable, existing);
   kvSet('probe_stations', plan);
   log.info(
-    `provision: ${plan.length}/${markets.length} market(s) stationed (${allProbes.length} probe(s))`,
+    `provision: ${plan.length}/${markets.length} market(s) stationed ` +
+      `(${allProbes.length} probe(s)${reserved.length ? `, ${reserved.length} reserved for scouting` : ''})`,
   );
   return bought;
 }

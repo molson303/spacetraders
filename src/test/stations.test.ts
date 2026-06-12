@@ -6,6 +6,7 @@ import {
   partitionProbes,
   planProbeStations,
   probesToProvision,
+  reserveScoutProbes,
   STRATEGIC_PRIORITY,
   type StationAssignment,
   type StationMarket,
@@ -210,4 +211,46 @@ test('planProbeStations: no rebalance churn among equal-priority covered markets
   const existing: StationAssignment[] = [{ ship: 'P-2', waypoint: 'X1-A20-M3' }];
   const out = planProbeStations(markets, [{ symbol: 'P-1' }, { symbol: 'P-2' }], existing);
   assert.ok(out.some((a) => a.ship === 'P-2' && a.waypoint === 'X1-A20-M3'), 'retained, no churn');
+});
+
+test('reserveScoutProbes: holds back the highest-symbol probes, keeps the rest stationable', () => {
+  const probes = [{ symbol: 'P-1' }, { symbol: 'P-3' }, { symbol: 'P-2' }];
+  const { stationable, reserved } = reserveScoutProbes(probes, 1);
+  assert.deepEqual(
+    stationable.map((p) => p.symbol),
+    ['P-1', 'P-2'],
+  );
+  assert.deepEqual(
+    reserved.map((p) => p.symbol),
+    ['P-3'],
+  );
+});
+
+test('reserveScoutProbes: a non-positive reserve is a no-op (all stationable)', () => {
+  const probes = [{ symbol: 'P-1' }, { symbol: 'P-2' }];
+  for (const r of [0, -5]) {
+    const { stationable, reserved } = reserveScoutProbes(probes, r);
+    assert.equal(stationable.length, 2);
+    assert.equal(reserved.length, 0);
+  }
+});
+
+test('reserveScoutProbes: always leaves at least one probe stationable', () => {
+  const { stationable, reserved } = reserveScoutProbes([{ symbol: 'P-1' }], 3);
+  assert.deepEqual(stationable.map((p) => p.symbol), ['P-1']);
+  assert.equal(reserved.length, 0);
+});
+
+test('reserveScoutProbes: reserve larger than fleet caps at length-1', () => {
+  const probes = [{ symbol: 'P-1' }, { symbol: 'P-2' }, { symbol: 'P-3' }];
+  const { stationable, reserved } = reserveScoutProbes(probes, 10);
+  assert.equal(stationable.length, 1);
+  assert.deepEqual(stationable.map((p) => p.symbol), ['P-1']);
+  assert.deepEqual(reserved.map((p) => p.symbol), ['P-2', 'P-3']);
+});
+
+test('reserveScoutProbes: empty fleet yields empty splits', () => {
+  const { stationable, reserved } = reserveScoutProbes([], 2);
+  assert.equal(stationable.length, 0);
+  assert.equal(reserved.length, 0);
 });

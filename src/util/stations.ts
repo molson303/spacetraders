@@ -201,6 +201,30 @@ export function probesToProvision(input: ProvisionInput): number {
   return Math.max(0, Math.min(uncovered, capRoom, budgetRoom, perCycle));
 }
 
+/** Probes split into those held back as flex scouts and the rest. */
+export interface ScoutReserve {
+  /** Probes free to be assigned to markets. */
+  stationable: ProbeRef[];
+  /** Probes withheld from stationing to stay flex for remote scouting. */
+  reserved: ProbeRef[];
+}
+
+/**
+ * Hold back up to `reserve` probes as a permanent flex pool for remote scouting,
+ * so {@link planProbeStations} can't consume every probe when markets outnumber
+ * them (which would leave nothing to discover new neighbors). The highest-symbol
+ * probes are reserved — `planProbeStations` fills markets from the lowest-symbol
+ * free probes onto the highest-priority markets, so withholding the top symbols
+ * drops only the lowest-priority (neighbor) stations. At least one probe always
+ * stays stationable, and a non-positive `reserve` is a no-op. Deterministic.
+ */
+export function reserveScoutProbes(probes: ProbeRef[], reserve: number): ScoutReserve {
+  const sorted = [...probes].sort((a, b) => a.symbol.localeCompare(b.symbol));
+  const r = Math.max(0, Math.min(Math.trunc(reserve), Math.max(0, sorted.length - 1)));
+  if (r === 0) return { stationable: sorted, reserved: [] };
+  return { stationable: sorted.slice(0, sorted.length - r), reserved: sorted.slice(sorted.length - r) };
+}
+
 /** Probes split into those holding a station and the rest (flex pool). */
 export interface ProbePartition {
   stationed: StationAssignment[];
