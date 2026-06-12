@@ -57,6 +57,7 @@ import { ClaimRegistry } from './coordinator/claimRegistry.js';
 import { partitionFleet } from './coordinator/fleetPlan.js';
 import { runShipAgent, type ShipAgentDeps, type ShipRole, type TripKind } from './agents/shipAgent.js';
 import { runProbeAgent, type ProbeCycleDeps } from './agents/probeAgent.js';
+import { runScoutAgent, type ScoutCycleDeps } from './agents/scoutAgent.js';
 import { runRoute, scanHere, drainStrandedCargo } from './behaviors/trader.js';
 import { runRemoteTrade } from './behaviors/remoteTrader.js';
 import { runContractPipeline } from './behaviors/contractPipeline.js';
@@ -85,6 +86,9 @@ const CFG = {
   reinvestIntervalMs: Number(process.env.REINVEST_INTERVAL_MS ?? 600_000),
   provisionIntervalMs: Number(process.env.PROVISION_INTERVAL_MS ?? 600_000),
   probeIntervalMs: Number(process.env.PROBE_INTERVAL_MS ?? 120_000),
+  // Remote scouting runs on its own slow loop, fully decoupled from the probe
+  // cycle so a ~50-min fuel-free round-trip never freezes station-keeping.
+  scoutIntervalMs: Number(process.env.SCOUT_INTERVAL_MS ?? 600_000),
   scanLimit: Number(process.env.SCAN_LIMIT ?? 20),
   scanBudgetMs: Number(process.env.SCAN_BUDGET_MS ?? 120_000),
   // Bounds in-system scanning per neighbor (from arrival), not the slow probe
@@ -285,21 +289,37 @@ async function main(): Promise<void> {
   await syncAgents();
 
   // ---- Probe fleet -------------------------------------------------------
-  // Stationed probes keep the market price map fresh; flex probes scout neighbor
-  // systems to seed the cross-gate source. Runs as one perpetual agent on its
-  // own interval, parallel to the trade agents.
+  // Stationed probes keep the market price map fresh; flex probes scan the home
+  // system. Runs as one perpetual agent on its own interval, parallel to the
+  // trade agents. Remote scouting is a separate loop (below) so a slow scout
+  // trip never blocks station-keeping or the cross-system ferries it drives.
   const probeDeps: ProbeCycleDeps = {
     listScouts: async () => (await api.listAllShips()).filter((s) => s.fuel.capacity === 0),
     getStations: () => kvGet<StationAssignment[]>('probe_stations') ?? [],
     stationKeep: (probes, stationed, allowCross) =>
       runStationKeeping(api, probes, stationed, { allowCrossSystem: allowCross }),
-    remoteScout: (ship) => runRemoteScout(api, ship, system, { budgetMs: CFG.scoutBudgetMs }),
     scan: (ship) => runScanner(api, ship, system, { limit: CFG.scanLimit, budgetMs: CFG.scanBudgetMs }),
-    refetchShip: (sym) => api.getShip(sym),
     gateOpen,
   };
   const probeJob = runProbeAgent(probeDeps, {
     intervalMs: CFG.probeIntervalMs,
+    stopping: () => stopping,
+    delay: (ms) => sleep(ms),
+  });
+
+  // ---- Remote scout ------------------------------------------------------
+  // Decoupled from the probe cycle: rides the gates into unscanned neighbor
+  // systems to seed cross-system arbitrage. Sends the index-0 flex probe (the
+  // slot the probe cycle reserves) on one ~50-min round-trip per slow tick;
+  // a no-op while every probe is stationed.
+  const scoutDeps: ScoutCycleDeps = {
+    listScouts: async () => (await api.listAllShips()).filter((s) => s.fuel.capacity === 0),
+    getStations: () => kvGet<StationAssignment[]>('probe_stations') ?? [],
+    remoteScout: (ship) => runRemoteScout(api, ship, system, { budgetMs: CFG.scoutBudgetMs }),
+    gateOpen,
+  };
+  const scoutJob = runScoutAgent(scoutDeps, {
+    intervalMs: CFG.scoutIntervalMs,
     stopping: () => stopping,
     delay: (ms) => sleep(ms),
   });
@@ -363,7 +383,7 @@ async function main(): Promise<void> {
 
   log.info('draining: waiting for in-flight trips to finish...');
   for (const t of timers) clearInterval(t);
-  await Promise.allSettled([...agentJobs, probeJob]);
+  await Promise.allSettled([...agentJobs, probeJob, scoutJob]);
 
   const finalCredits = (await api.getMyAgent()).credits;
   log.info(
