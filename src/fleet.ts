@@ -18,6 +18,9 @@
  *
  * Env (in addition to the shared maintenance vars from maintenance.ts):
  *   CROSS_SHIPS        earners dedicated to cross-gate hauling (default 2)
+ *   REMOTE_TRADE_SYSTEMS  comma list of remote system symbols to station in-system
+ *                      traders in (e.g. "X1-FU76,X1-CN42"); off when empty
+ *   REMOTE_TRADE_SHIPS    earners stationed in EACH listed remote system (default 1)
  *   MIN_PROFIT         minimum per-unit spread to act on (default 20)
  *   MAX_CONTRACTS      contracts the contractor completes per pipeline run (1)
  *   CONTRACTOR         "1" to reserve the largest earner as contractor (default 1)
@@ -60,6 +63,7 @@ import { runProbeAgent, type ProbeCycleDeps } from './agents/probeAgent.js';
 import { runScoutAgent, type ScoutCycleDeps } from './agents/scoutAgent.js';
 import { runRoute, scanHere, drainStrandedCargo } from './behaviors/trader.js';
 import { runRemoteTrade } from './behaviors/remoteTrader.js';
+import { crossSystemTravelTo } from './util/crossNav.js';
 import { runContractPipeline } from './behaviors/contractPipeline.js';
 import { runStationKeeping } from './behaviors/stationKeeper.js';
 import { runRemoteScout } from './behaviors/remoteScout.js';
@@ -74,6 +78,15 @@ import type { Ship } from './types/index.js';
 
 const CFG = {
   crossShips: Number(process.env.CROSS_SHIPS ?? 2),
+  // Remote in-system traders: earners relocated to live in a remote system and
+  // run in-system arbitrage there (no jump back home per trade). REMOTE_TRADE_SYSTEMS
+  // is a comma list of system symbols; REMOTE_TRADE_SHIPS is how many earners to
+  // station in EACH listed system. Off by default (no systems listed).
+  remoteTradeSystems: (process.env.REMOTE_TRADE_SYSTEMS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
+  remoteTradeShips: Number(process.env.REMOTE_TRADE_SHIPS ?? 1),
   minProfit: Number(process.env.MIN_PROFIT ?? 20),
   maxContracts: Number(process.env.MAX_CONTRACTS ?? 1),
   contractor: (process.env.CONTRACTOR ?? '1') === '1',
@@ -146,6 +159,7 @@ interface RoleStats {
 const stats: Record<ShipRole, RoleStats> = {
   local: { trips: 0, profit: 0, contracts: 0 },
   cross: { trips: 0, profit: 0, contracts: 0 },
+  remote: { trips: 0, profit: 0, contracts: 0 },
   contractor: { trips: 0, profit: 0, contracts: 0 },
 };
 
@@ -167,6 +181,20 @@ async function main(): Promise<void> {
   await hydrateMarketStructures(api, system);
   await hydrateJumpGates(api, system);
   await hydrateContracts(api);
+
+  // Hydrate each remote trade system so in-system traders have waypoints (for
+  // nav/distance), market structures (for arbitrage candidates), and the gate
+  // (for the one-time relocation jump). Probes keep these prices fresh after.
+  for (const sys of CFG.remoteTradeSystems) {
+    try {
+      await hydrateSystemWaypoints(api, sys);
+      await hydrateMarketStructures(api, sys);
+      await hydrateJumpGates(api, sys);
+      log.info(`hydrated remote trade system ${sys}`);
+    } catch (err) {
+      log.warn(`could not hydrate remote trade system ${sys}: ${(err as Error).message}`);
+    }
+  }
 
   const registry = new ClaimRegistry();
 
@@ -201,6 +229,10 @@ async function main(): Promise<void> {
   };
   const localCandidates = (): ReturnType<typeof findArbitrageRoutes> =>
     findArbitrageRoutes(system, CFG.minProfit, 30);
+  // Local candidates for an arbitrary system — remote in-system traders read
+  // their own system's routes instead of home's.
+  const localCandidatesFor = (sys: string): (() => ReturnType<typeof findArbitrageRoutes>) =>
+    sys === system ? localCandidates : () => findArbitrageRoutes(sys, CFG.minProfit, 30);
   const crossCandidates = (): CrossSystemRoute[] =>
     gateOpen() ? (findCrossSystemArbitrageRoutes(CFG.minProfit) as CrossSystemRoute[]) : [];
 
@@ -215,8 +247,8 @@ async function main(): Promise<void> {
   const running = new Set<string>();
   const agentJobs: Promise<unknown>[] = [];
 
-  const depsFor = (): ShipAgentDeps => ({
-    localCandidates,
+  const depsFor = (tradeSystem: string = system): ShipAgentDeps => ({
+    localCandidates: localCandidatesFor(tradeSystem),
     crossCandidates,
     execLocal: (ship, route) => runRoute(api, ship, route, CFG.minProfit, maxTradeSpend),
     execCross: (ship, route) => runRemoteTrade(api, ship, route, CFG.minProfit),
@@ -242,18 +274,37 @@ async function main(): Promise<void> {
       : undefined,
   });
 
-  const launch = (ship: Ship, role: ShipRole): void => {
+  const launch = (ship: Ship, role: ShipRole, tradeSystem: string = system): void => {
     if (running.has(ship.symbol)) return;
     running.add(ship.symbol);
     const job = (async () => {
       try {
+        let s = ship;
+        // Remote in-system trader: relocate once to its trade system (one jump
+        // out), then trade in-system there forever — no jump back home per trip.
+        if (tradeSystem !== system && systemOf(s.nav.waypointSymbol) !== tradeSystem) {
+          const gate = findJumpGatesBySystem(tradeSystem)[0];
+          if (gate) {
+            log.info(`${s.symbol} relocating to ${tradeSystem} for in-system trading`);
+            s = await crossSystemTravelTo(api, s, gate.symbol);
+            if (systemOf(s.nav.waypointSymbol) !== tradeSystem) {
+              log.warn(`${s.symbol} could not relocate to ${tradeSystem}; trading where it landed`);
+            }
+          } else {
+            log.warn(`${s.symbol} no known gate for ${tradeSystem}; cannot relocate`);
+          }
+        }
+        // The system the ship actually ended up in drives its candidates/drain,
+        // so a failed relocation degrades to trading wherever it is rather than
+        // claiming routes it can't reach.
+        const homeOf = systemOf(s.nav.waypointSymbol);
         // Clear any stale cargo the ship is holding before its first trip so a
         // hauler that started full of mismatched goods doesn't churn forever.
-        await scanHere(api, ship);
-        const drained = await drainStrandedCargo(api, ship, system);
-        await runShipAgent(drained, registry, depsFor(), {
+        await scanHere(api, s);
+        const drained = await drainStrandedCargo(api, s, homeOf);
+        await runShipAgent(drained, registry, depsFor(homeOf), {
           role,
-          system,
+          system: homeOf,
           minProfit: CFG.minProfit,
           antimatterCost: CFG.crossAntimatterCost,
           holdSize: drained.cargo.capacity,
@@ -276,13 +327,19 @@ async function main(): Promise<void> {
       crossShips: CFG.crossShips,
       enableContractor: CFG.contractor,
       excludeShips: CFG.excludeShips,
+      remoteSystems: CFG.remoteTradeSystems.map((sys) => ({
+        system: sys,
+        ships: CFG.remoteTradeShips,
+      })),
     });
     if (part.contractor) launch(part.contractor, 'contractor');
     for (const s of part.cross) launch(s, 'cross');
+    for (const r of part.remote) launch(r.ship, 'remote', r.system);
     for (const s of part.local) launch(s, 'local');
     log.info(
       `agents: contractor=${part.contractor?.symbol ?? 'none'} ` +
         `cross=[${part.cross.map((s) => s.symbol).join(', ')}] ` +
+        `remote=[${part.remote.map((r) => `${r.ship.symbol}@${r.system}`).join(', ')}] ` +
         `local=[${part.local.map((s) => s.symbol).join(', ')}] (running=${running.size})`,
     );
   };
@@ -375,6 +432,7 @@ async function main(): Promise<void> {
     log.info(
       `stats | credits=${cur} (Δ${cur - baseline}) running=${running.size} claims=${registry.size()} ` +
         `local{trips=${stats.local.trips} profit=${stats.local.profit}} ` +
+        `remote{trips=${stats.remote.trips} profit=${stats.remote.profit}} ` +
         `cross{trips=${stats.cross.trips} profit=${stats.cross.profit}} ` +
         `contractor{trips=${stats.contractor.trips} contracts=${stats.contractor.contracts} profit=${stats.contractor.profit}}`,
     );
@@ -390,7 +448,7 @@ async function main(): Promise<void> {
   const finalCredits = (await api.getMyAgent()).credits;
   log.info(
     `fleet stopped | credits=${finalCredits} (total Δ${finalCredits - baseline}) ` +
-      `trips: local=${stats.local.trips} cross=${stats.cross.trips} contractor=${stats.contractor.trips}`,
+      `trips: local=${stats.local.trips} remote=${stats.remote.trips} cross=${stats.cross.trips} contractor=${stats.contractor.trips}`,
   );
   closeDb();
   process.exit(0);

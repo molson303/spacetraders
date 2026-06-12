@@ -105,6 +105,83 @@ test('deterministic tiebreak by symbol when fuel and cargo are equal', () => {
   );
 });
 
+test('remote traders are drawn from the highest-range pool after cross', () => {
+  const ships = [
+    ship('BIG', 80, 300), // contractor (largest hold)
+    ship('R1', 40, 600), // highest fuel -> cross
+    ship('R2', 40, 590), // next -> remote
+    ship('R3', 40, 580), // next -> remote
+    ship('LOCAL', 40, 300), // rest -> local
+  ];
+  const part = partitionFleet(ships, {
+    crossShips: 1,
+    enableContractor: true,
+    remoteSystems: [{ system: 'X1-FU76', ships: 2 }],
+  });
+  assert.equal(part.contractor?.symbol, 'BIG');
+  assert.deepEqual(
+    part.cross.map((s) => s.symbol),
+    ['R1'],
+  );
+  assert.deepEqual(
+    part.remote.map((r) => `${r.ship.symbol}@${r.system}`),
+    ['R2@X1-FU76', 'R3@X1-FU76'],
+  );
+  assert.deepEqual(
+    part.local.map((s) => s.symbol),
+    ['LOCAL'],
+  );
+});
+
+test('remote quotas fill system-by-system in list order', () => {
+  const ships = [
+    ship('A', 40, 600),
+    ship('B', 40, 590),
+    ship('C', 40, 580),
+    ship('D', 40, 570),
+  ];
+  const part = partitionFleet(ships, {
+    crossShips: 0,
+    enableContractor: false,
+    remoteSystems: [
+      { system: 'X1-FU76', ships: 1 },
+      { system: 'X1-CN42', ships: 2 },
+    ],
+  });
+  assert.deepEqual(
+    part.remote.map((r) => `${r.ship.symbol}@${r.system}`),
+    ['A@X1-FU76', 'B@X1-CN42', 'C@X1-CN42'],
+  );
+  assert.deepEqual(
+    part.local.map((s) => s.symbol),
+    ['D'],
+  );
+});
+
+test('remote quota beyond the pool stops cleanly, no local left', () => {
+  const part = partitionFleet([ship('A', 40, 600), ship('B', 40, 500)], {
+    crossShips: 0,
+    enableContractor: false,
+    remoteSystems: [{ system: 'X1-FU76', ships: 5 }],
+  });
+  assert.deepEqual(
+    part.remote.map((r) => r.ship.symbol),
+    ['A', 'B'],
+  );
+  assert.deepEqual(part.local, []);
+});
+
+test('no remoteSystems leaves remote empty (backwards compatible)', () => {
+  const part = partitionFleet([ship('BIG', 80, 300), ship('A', 40, 500)], {
+    crossShips: 1,
+  });
+  assert.deepEqual(part.remote, []);
+  assert.deepEqual(
+    part.local.map((s) => s.symbol),
+    [],
+  );
+});
+
 test('empty fleet yields empty buckets', () => {
   const part = partitionFleet([], { crossShips: 2 });
   assert.equal(part.contractor, undefined);

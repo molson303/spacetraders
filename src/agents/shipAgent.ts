@@ -8,6 +8,10 @@
  *
  * Three roles share the same loop:
  *   - `local`      : in-system arbitrage, cr/s-ranked ({@link pickLocalRoute}).
+ *   - `remote`     : identical in-system arbitrage, but the ship lives in a
+ *                    remote system and its `localCandidates` are that system's
+ *                    routes — no jump back home per trade. Tracked separately
+ *                    for stats; control-flow is the same as `local`.
  *   - `cross`      : cross-gate arbitrage, net-profit-ranked
  *                    ({@link pickCrossRoute}); falls back to a local trip when
  *                    the gate is shut or every cross lane is claimed, so a cross
@@ -33,7 +37,7 @@ import { createLogger } from '../util/logger.js';
 
 const log = createLogger('shipAgent');
 
-export type ShipRole = 'local' | 'cross' | 'contractor';
+export type ShipRole = 'local' | 'cross' | 'contractor' | 'remote';
 
 export interface ShipAgentDeps {
   /** Fresh in-system arbitrage candidates for this trip (live prices). */
