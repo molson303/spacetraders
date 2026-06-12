@@ -23,6 +23,8 @@
  *   CONTRACTOR         "1" to reserve the largest earner as contractor (default 1)
  *   REINVEST_INTERVAL_MS   reinvest timer period (default 600000 = 10 min)
  *   PROVISION_INTERVAL_MS  probe provisioning timer period (default 600000)
+ *   MAX_PROBES_PER_CYCLE   probes bought per provisioning cycle (default 3) — caps
+ *                      same-type price escalation by re-scanning each cycle
  *   STATS_INTERVAL_MS      per-fleet stats snapshot period (default 60000 = 1 min)
  *   IDLE_MS            pause for a ship that found no work this trip (default 15000)
  *   EXCLUDE_SHIPS      comma list of ship symbols to drop from the trade fleet,
@@ -64,6 +66,7 @@ import { runScanner } from './behaviors/scanner.js';
 import { maybeReinvest, maybeProvisionProbes, repairWornShip, type MaintenanceConfig } from './fleet/maintenance.js';
 import { sleep } from './client/rateLimiter.js';
 import { log } from './util/logger.js';
+import { nonReentrant } from './util/concurrency.js';
 import type { CrossSystemRoute } from './util/crossRoutes.js';
 import type { StationAssignment } from './util/stations.js';
 import type { Ship } from './types/index.js';
@@ -91,6 +94,7 @@ const CFG = {
   reserve: Number(process.env.RESERVE ?? 75000),
   maxShips: Number(process.env.MAX_SHIPS ?? 8),
   maxProbes: Number(process.env.MAX_PROBES ?? 0),
+  maxProbesPerCycle: Number(process.env.MAX_PROBES_PER_CYCLE ?? 3),
   probeCostEst: Number(process.env.PROBE_COST_EST ?? 15000),
   reinvestYard: process.env.REINVEST_YARD?.trim() || undefined,
   shipCostEst: Number(process.env.SHIP_COST_EST ?? 90000),
@@ -302,6 +306,7 @@ async function main(): Promise<void> {
     reserve: CFG.reserve,
     maxShips: CFG.maxShips,
     maxProbes: CFG.maxProbes,
+    maxProbesPerCycle: CFG.maxProbesPerCycle,
     probeCostEst: CFG.probeCostEst,
     minProfit: CFG.minProfit,
     reinvestYard: CFG.reinvestYard,
@@ -321,15 +326,25 @@ async function main(): Promise<void> {
     timers.push(setInterval(() => void Promise.resolve(fn()).catch((e) => log.warn(`timer: ${e}`)), ms));
   };
 
-  every(CFG.reinvestIntervalMs, async () => {
-    if (stopping) return;
-    const bought = await maybeReinvest(api, cfg);
-    if (bought > 0) await syncAgents(); // give the new earners agents
-  });
-  every(CFG.provisionIntervalMs, async () => {
-    if (stopping) return;
-    await maybeProvisionProbes(api, cfg);
-  });
+  // Maintenance tasks can outlast their interval (provisioning travels, scans,
+  // and buys). Wrap each in nonReentrant so a slow cycle skips the overlapping
+  // tick instead of running concurrently on stale fleet state and overshooting
+  // the probe/ship caps.
+  every(
+    CFG.reinvestIntervalMs,
+    nonReentrant(async () => {
+      if (stopping) return;
+      const bought = await maybeReinvest(api, cfg);
+      if (bought > 0) await syncAgents(); // give the new earners agents
+    }),
+  );
+  every(
+    CFG.provisionIntervalMs,
+    nonReentrant(async () => {
+      if (stopping) return;
+      await maybeProvisionProbes(api, cfg);
+    }),
+  );
   every(CFG.statsIntervalMs, async () => {
     const cur = (await api.getMyAgent()).credits;
     log.info(

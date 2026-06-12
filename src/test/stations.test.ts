@@ -91,6 +91,47 @@ test('probesToProvision: zero when fully covered or unaffordable', () => {
   );
 });
 
+test('probesToProvision: bounded by per-cycle cap', () => {
+  // Plenty of uncovered markets, cap headroom, and budget — but the per-cycle
+  // cap limits how many we buy at once so escalating prices get re-scanned next
+  // cycle (the -1.12M runaway probe-buy guard).
+  assert.equal(
+    probesToProvision({
+      marketCount: 30,
+      stationed: 0,
+      currentProbes: 12,
+      maxProbes: 30,
+      budget: 1e9,
+      probePrice: 1000,
+      maxPerCycle: 3,
+    }),
+    3,
+  );
+});
+
+test('probesToProvision: per-cycle cap never raises the count', () => {
+  // When another bound (here cap headroom = 2) is tighter than maxPerCycle, the
+  // tighter bound wins.
+  assert.equal(
+    probesToProvision({
+      marketCount: 30,
+      stationed: 0,
+      currentProbes: 28,
+      maxProbes: 30,
+      budget: 1e9,
+      probePrice: 1000,
+      maxPerCycle: 5,
+    }),
+    2,
+  );
+});
+
+test('probesToProvision: maxPerCycle omitted/<=0 means no per-cycle cap', () => {
+  const base = { marketCount: 10, stationed: 0, currentProbes: 0, maxProbes: 20, budget: 1e9, probePrice: 1000 };
+  assert.equal(probesToProvision(base), 10); // legacy behavior preserved
+  assert.equal(probesToProvision({ ...base, maxPerCycle: 0 }), 10);
+});
+
 test('partitionProbes: splits stationed vs flex', () => {
   const probes = [{ symbol: 'P-1' }, { symbol: 'P-2' }, { symbol: 'P-3' }];
   const stations: StationAssignment[] = [

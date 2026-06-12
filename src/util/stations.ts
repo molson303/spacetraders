@@ -176,18 +176,29 @@ export interface ProvisionInput {
   budget: number;
   /** Live probe price; <= 0 disables buying. */
   probePrice: number;
+  /**
+   * Hard cap on probes bought in a single provisioning cycle. Same-type ship
+   * prices escalate per purchase, so buying a large batch in one cycle drains
+   * the wallet at runaway prices (the -1.12M probe-buy incident). Capping per
+   * cycle forces the live (escalated) price to be re-scanned next cycle, so the
+   * budget naturally throttles the spend. Omit/<=0 for no per-cycle cap.
+   */
+  maxPerCycle?: number;
 }
 
 /**
  * How many probes to buy this cycle: bounded by uncovered markets, the probe
- * cap headroom, and how many fit the budget. Never negative.
+ * cap headroom, how many fit the budget, and the per-cycle buy cap. Never
+ * negative.
  */
 export function probesToProvision(input: ProvisionInput): number {
   const uncovered = Math.max(0, input.marketCount - input.stationed);
   const capRoom = Math.max(0, input.maxProbes - input.currentProbes);
   const budgetRoom =
     input.probePrice > 0 ? Math.floor(input.budget / input.probePrice) : 0;
-  return Math.max(0, Math.min(uncovered, capRoom, budgetRoom));
+  const perCycle =
+    input.maxPerCycle && input.maxPerCycle > 0 ? input.maxPerCycle : Infinity;
+  return Math.max(0, Math.min(uncovered, capRoom, budgetRoom, perCycle));
 }
 
 /** Probes split into those holding a station and the rest (flex pool). */

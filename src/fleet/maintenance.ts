@@ -44,6 +44,13 @@ export interface MaintenanceConfig {
   reserve: number;
   maxShips: number;
   maxProbes: number;
+  /**
+   * Cap on probes bought per provisioning cycle. Same-type ship prices escalate
+   * per purchase, so a large single-cycle batch drains the wallet at runaway
+   * prices; capping per cycle re-scans the escalated price next cycle and lets
+   * the budget throttle the spend. Defaults to no cap when omitted.
+   */
+  maxProbesPerCycle?: number;
   probeCostEst: number;
   minProfit: number;
   reinvestYard: string | undefined;
@@ -279,6 +286,7 @@ export async function maybeProvisionProbes(
       maxProbes: cfg.maxProbes,
       budget: agent.credits - cfg.reserve,
       probePrice: cfg.probeCostEst,
+      maxPerCycle: cfg.maxProbesPerCycle,
     });
 
     if (buyCount > 0) {
