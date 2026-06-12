@@ -87,6 +87,9 @@ const CFG = {
   probeIntervalMs: Number(process.env.PROBE_INTERVAL_MS ?? 120_000),
   scanLimit: Number(process.env.SCAN_LIMIT ?? 20),
   scanBudgetMs: Number(process.env.SCAN_BUDGET_MS ?? 120_000),
+  // Bounds in-system scanning per neighbor (from arrival), not the slow probe
+  // travel out to the gate — kept separate from the local scanner's budget.
+  scoutBudgetMs: Number(process.env.SCOUT_BUDGET_MS ?? 600_000),
   statsIntervalMs: Number(process.env.STATS_INTERVAL_MS ?? 60_000),
   idleMs: Number(process.env.IDLE_MS ?? 15_000),
   // Shared maintenance config (mirrors supervisor.ts env names).
@@ -290,7 +293,7 @@ async function main(): Promise<void> {
     getStations: () => kvGet<StationAssignment[]>('probe_stations') ?? [],
     stationKeep: (probes, stationed, allowCross) =>
       runStationKeeping(api, probes, stationed, { allowCrossSystem: allowCross }),
-    remoteScout: (ship) => runRemoteScout(api, ship, system, { budgetMs: CFG.scanBudgetMs }),
+    remoteScout: (ship) => runRemoteScout(api, ship, system, { budgetMs: CFG.scoutBudgetMs }),
     scan: (ship) => runScanner(api, ship, system, { limit: CFG.scanLimit, budgetMs: CFG.scanBudgetMs }),
     refetchShip: (sym) => api.getShip(sym),
     gateOpen,
