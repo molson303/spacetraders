@@ -167,6 +167,53 @@ test('claim is released even when execution throws', async () => {
   assert.equal(res.trips, 1); // trip still counted, loop survives
 });
 
+test('a thrown trip resyncs the ship to live state before the next trip', async () => {
+  // Regression (the cross "Destination is outside the X1-A20 system" thrash):
+  // when a trip throws, `ship` is left as the stale pre-trip snapshot. Without a
+  // resync the agent re-plans against that stale nav state and fails forever.
+  // After an error the agent must refetch live state so the next trip plans
+  // against where the ship actually is.
+  const reg = new ClaimRegistry();
+  const seen: string[] = [];
+  let call = 0;
+  await runShipAgent(
+    ship('S1'),
+    reg,
+    deps({
+      // The server moved the ship mid-trip; the live roster reflects the new spot.
+      refetchShip: async () => ship('S1-LIVE'),
+      execCross: async (s) => {
+        seen.push(s.symbol);
+        if (call++ === 0) throw new Error('Destination is outside the X1-A20 system');
+        return { ship: s, profit: 500, traded: true };
+      },
+    }),
+    opts({ role: 'cross', maxTrips: 2 }),
+  );
+  // Trip 1 saw the original snapshot and threw; trip 2 saw the refetched ship.
+  assert.deepEqual(seen, ['S1', 'S1-LIVE']);
+  assert.equal(reg.size(), 0); // claim released despite the throw
+});
+
+test('a failed post-error refetch keeps the loop alive on the stale ship', async () => {
+  const reg = new ClaimRegistry();
+  const res = await runShipAgent(
+    ship('S1'),
+    reg,
+    deps({
+      execLocal: async () => {
+        throw new Error('boom');
+      },
+      refetchShip: async () => {
+        throw new Error('roster 500');
+      },
+    }),
+    opts({ role: 'local', maxTrips: 2 }),
+  );
+  assert.equal(res.trips, 2); // both refetches failed, loop survived anyway
+  assert.equal(res.profit, 0);
+});
+
 test('cross role runs a cross route when the gate is open', async () => {
   const reg = new ClaimRegistry();
   let crossRan = false;

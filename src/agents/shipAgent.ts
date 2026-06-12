@@ -199,6 +199,18 @@ export async function runShipAgent(
     } catch (err) {
       log.error(`${ship.symbol} trip errored: ${(err as Error).message}`);
       kind = 'idle';
+      // A thrown trip leaves `ship` as the pre-trip snapshot — its nav state can
+      // be stale relative to the server (the ship moved or started a transit
+      // mid-trip before the throw). Planning the next trip on that stale state
+      // targets the wrong system/waypoint and fails again, looping forever
+      // (the cross-ship "Destination is outside the X1-A20 system" thrash).
+      // Resync to live state so the next iteration plans against where the ship
+      // actually is. Best-effort: keep the snapshot if the refetch itself fails.
+      try {
+        ship = await deps.refetchShip(ship.symbol);
+      } catch (refetchErr) {
+        log.warn(`${ship.symbol} post-error refetch failed: ${(refetchErr as Error).message}`);
+      }
     }
 
     profit += tripProfit;
