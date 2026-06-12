@@ -15,19 +15,15 @@ import {
 
 const log = createLogger('world');
 
-/** Pull all owned ships into the DB. Returns them. */
+/**
+ * Pull all owned ships into the DB. Returns them. Delegates to the resilient
+ * `listAllShips()` so a single server-corrupted ship (which makes the API 500
+ * on a bulk page) can't brick the whole fleet boot — that ship is skipped and
+ * picked up automatically once the server recovers it.
+ */
 export async function hydrateShips(api: SpaceTradersApi) {
-  const all = [];
-  let page = 1;
-  for (;;) {
-    const res = await api.listShips({ page, limit: 20 });
-    for (const s of res.data) {
-      upsertShip(s);
-      all.push(s);
-    }
-    if (res.data.length < res.meta.limit || all.length >= res.meta.total) break;
-    page++;
-  }
+  const all = await api.listAllShips();
+  for (const s of all) upsertShip(s);
   log.info(`hydrated ${all.length} ships`);
   return all;
 }

@@ -18,7 +18,7 @@ import type {
   Waypoint,
   FlightMode,
 } from '../types/index.js';
-import { HttpClient } from './http.js';
+import { ApiError, HttpClient } from './http.js';
 import { RateLimiter } from './rateLimiter.js';
 import { collectAllPages } from '../util/paginate.js';
 
@@ -175,9 +175,38 @@ export class SpaceTradersApi {
    * that reason about the whole roster (fleet partitioning, probe/flex split,
    * earner counts, repair sweeps) MUST use this — a single listShips() page
    * silently hides ships beyond the first 20.
+   *
+   * Resilient to server-side corruption of a single ship: a bad ship can make
+   * the API 500 on a whole bulk page, so on a 5xx we fall back to a per-ship
+   * (limit=1) scan that skips any ship the server cannot serialize. The skipped
+   * ship reappears automatically once the server recovers it.
    */
   async listAllShips(): Promise<Ship[]> {
-    return collectAllPages((page) => this.listShips({ page, limit: 20 }));
+    try {
+      return await collectAllPages((page) => this.listShips({ page, limit: 20 }));
+    } catch (err) {
+      if (err instanceof ApiError && err.httpStatus >= 500) {
+        return this.listAllShipsPerShip();
+      }
+      throw err;
+    }
+  }
+
+  /** Per-ship roster scan (limit=1) that skips ships the server 500s on. */
+  private async listAllShipsPerShip(): Promise<Ship[]> {
+    const first = await this.listShips({ page: 1, limit: 1 });
+    const total = first.meta?.total ?? first.data.length;
+    const all: Ship[] = [];
+    for (let page = 1; page <= total; page++) {
+      try {
+        const res = await this.listShips({ page, limit: 1 });
+        all.push(...res.data);
+      } catch (err) {
+        if (err instanceof ApiError && err.httpStatus >= 500) continue;
+        throw err;
+      }
+    }
+    return all;
   }
 
   async getShip(symbol: string): Promise<Ship> {
