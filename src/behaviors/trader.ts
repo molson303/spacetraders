@@ -170,7 +170,7 @@ export async function runRoute(
   route: ArbitrageRoute,
   minProfit: number,
   maxTradeSpend?: number | (() => number | undefined),
-): Promise<{ ship: Ship; profit: number }> {
+): Promise<{ ship: Ship; profit: number; traded: boolean }> {
   log.info(
     `${ship.symbol} arb ${route.good}: buy@${route.buyAt}(${route.buyPrice}) -> sell@${route.sellAt}(${route.sellPrice}) ~${route.profitPerUnit}/u`,
   );
@@ -189,7 +189,7 @@ export async function runRoute(
     log.info(
       `${ship.symbol} budget cap ${route.good}: ~${route.buyPrice}/u exceeds per-trade budget ${maxSpend}; skipping route`,
     );
-    return { ship, profit: 0 };
+    return { ship, profit: 0, traded: false };
   }
   if (buyUnits < freeCargo) {
     log.info(
@@ -207,7 +207,7 @@ export async function runRoute(
   ship = buy.ship;
   if (buy.unitsBought === 0) {
     log.warn(`${ship.symbol} bought nothing for ${route.good}; skipping route`);
-    return { ship, profit: 0 };
+    return { ship, profit: 0, traded: false };
   }
 
   const avgCost = buy.spent / buy.unitsBought;
@@ -253,7 +253,7 @@ export async function runRoute(
   log.info(
     `${ship.symbol} arb done ${route.good}: spent=${buy.spent} earned=${earned} profit=${profit}`,
   );
-  return { ship, profit };
+  return { ship, profit, traded: true };
 }
 
 /**

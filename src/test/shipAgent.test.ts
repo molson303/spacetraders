@@ -49,8 +49,8 @@ function deps(over: Partial<ShipAgentDeps> = {}): ShipAgentDeps {
   return {
     localCandidates: () => [localRoute()],
     crossCandidates: () => [crossRoute()],
-    execLocal: async (s) => ({ ship: s, profit: 100 }),
-    execCross: async (s) => ({ ship: s, profit: 500 }),
+    execLocal: async (s) => ({ ship: s, profit: 100, traded: true }),
+    execCross: async (s) => ({ ship: s, profit: 500, traded: true }),
     execContract: async () => 0,
     refetchShip: async (sym) => ship(sym),
     distanceOf: () => 10,
@@ -84,7 +84,7 @@ test('claim is held during execution and released after the trip', async () => {
     deps({
       execLocal: async (s) => {
         claimedGoodDuringExec = reg.goodOf('HAULER');
-        return { ship: s, profit: 10 };
+        return { ship: s, profit: 10, traded: true };
       },
     }),
     opts({ role: 'local' }),
@@ -105,6 +105,49 @@ test('local role idles (no profit) and waits when no route is free', async () =>
   assert.equal(res.profit, 0);
   assert.equal(res.trips, 2);
   assert.equal(idled, 2);
+});
+
+test('a claimed route that does not trade (budget cap) idles with backoff', async () => {
+  // Regression: runRoute can no-op (budget cap / bought nothing) and return
+  // traded=false. The agent must treat that as idle so it backs off instead of
+  // busy-spinning on the same dead route (the credit-drain log-spam incident).
+  const reg = new ClaimRegistry();
+  let idled = 0;
+  const events: { kind: string; profit: number }[] = [];
+  const res = await runShipAgent(
+    ship(),
+    reg,
+    deps({
+      execLocal: async (s) => ({ ship: s, profit: 0, traded: false }),
+      idleDelay: async () => void idled++,
+      onTrip: (e) => events.push({ kind: e.kind, profit: e.profit }),
+    }),
+    opts({ role: 'local', maxTrips: 3 }),
+  );
+  assert.equal(res.profit, 0);
+  assert.equal(idled, 3); // backed off every trip instead of spinning
+  assert.deepEqual(
+    events.map((e) => e.kind),
+    ['idle', 'idle', 'idle'],
+  );
+  assert.equal(reg.size(), 0); // claim released each time
+});
+
+test('a cross route that does not trade idles with backoff', async () => {
+  const reg = new ClaimRegistry();
+  let idled = 0;
+  const res = await runShipAgent(
+    ship(),
+    reg,
+    deps({
+      execCross: async (s) => ({ ship: s, profit: 0, traded: false }),
+      idleDelay: async () => void idled++,
+    }),
+    opts({ role: 'cross', maxTrips: 2 }),
+  );
+  assert.equal(res.profit, 0);
+  assert.equal(idled, 2);
+  assert.equal(reg.size(), 0);
 });
 
 test('claim is released even when execution throws', async () => {
@@ -130,7 +173,7 @@ test('cross role runs a cross route when the gate is open', async () => {
   const res = await runShipAgent(
     ship(),
     reg,
-    deps({ execCross: async (s) => ((crossRan = true), { ship: s, profit: 700 }) }),
+    deps({ execCross: async (s) => ((crossRan = true), { ship: s, profit: 700, traded: true }) }),
     opts({ role: 'cross' }),
   );
   assert.ok(crossRan);
@@ -147,8 +190,8 @@ test('cross role falls back to local trade when the gate is shut', async () => {
     reg,
     deps({
       gateOpen: () => false,
-      execCross: async (s) => ((crossRan = true), { ship: s, profit: 700 }),
-      execLocal: async (s) => ((localRan = true), { ship: s, profit: 120 }),
+      execCross: async (s) => ((crossRan = true), { ship: s, profit: 700, traded: true }),
+      execLocal: async (s) => ((localRan = true), { ship: s, profit: 120, traded: true }),
     }),
     opts({ role: 'cross' }),
   );
@@ -164,7 +207,7 @@ test('cross role falls back to local when every cross lane is claimed', async ()
   const res = await runShipAgent(
     ship(),
     reg,
-    deps({ execLocal: async (s) => ((localRan = true), { ship: s, profit: 90 }) }),
+    deps({ execLocal: async (s) => ((localRan = true), { ship: s, profit: 90, traded: true }) }),
     opts({ role: 'cross' }),
   );
   assert.ok(localRan);
@@ -181,7 +224,7 @@ test('contractor role counts completed contracts and refetches the ship', async 
     deps({
       execContract: async () => 2,
       refetchShip: async (sym) => ((refetched = true), ship(sym)),
-      execLocal: async (s) => ((localRan = true), { ship: s, profit: 5 }),
+      execLocal: async (s) => ((localRan = true), { ship: s, profit: 5, traded: true }),
     }),
     opts({ role: 'contractor' }),
   );
@@ -198,7 +241,7 @@ test('contractor role falls back to local trade when no contract is workable', a
     reg,
     deps({
       execContract: async () => 0,
-      execLocal: async (s) => ((localRan = true), { ship: s, profit: 60 }),
+      execLocal: async (s) => ((localRan = true), { ship: s, profit: 60, traded: true }),
     }),
     opts({ role: 'contractor' }),
   );
@@ -259,7 +302,7 @@ test('a repair diversion swaps in the repaired ship for the trip', async () => {
     reg,
     deps({
       repairIfWorn: async () => ship('S1-REPAIRED'),
-      execLocal: async (s) => ((tradedShip = s.symbol), { ship: s, profit: 1 }),
+      execLocal: async (s) => ((tradedShip = s.symbol), { ship: s, profit: 1, traded: true }),
     }),
     opts({ role: 'local', maxTrips: 1 }),
   );
@@ -288,7 +331,7 @@ test('a stop signal mid-run halts further trips', async () => {
   const res = await runShipAgent(
     ship(),
     reg,
-    deps({ stopping: () => n >= 2, execLocal: async (s) => (n++, { ship: s, profit: 100 }) }),
+    deps({ stopping: () => n >= 2, execLocal: async (s) => (n++, { ship: s, profit: 100, traded: true }) }),
     opts({ role: 'local', maxTrips: 10 }),
   );
   assert.equal(res.trips, 2);

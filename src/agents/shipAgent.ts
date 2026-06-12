@@ -40,10 +40,10 @@ export interface ShipAgentDeps {
   localCandidates: () => ArbitrageRoute[];
   /** Fresh cross-system arbitrage candidates for this trip. */
   crossCandidates: () => CrossSystemRoute[];
-  /** Execute one local route; returns the moved ship and realized profit. */
-  execLocal: (ship: Ship, route: ArbitrageRoute) => Promise<{ ship: Ship; profit: number }>;
-  /** Execute one cross-system route; returns the moved ship and realized profit. */
-  execCross: (ship: Ship, route: CrossSystemRoute) => Promise<{ ship: Ship; profit: number }>;
+  /** Execute one local route; returns the moved ship, realized profit, and whether a trade actually happened. */
+  execLocal: (ship: Ship, route: ArbitrageRoute) => Promise<{ ship: Ship; profit: number; traded: boolean }>;
+  /** Execute one cross-system route; returns the moved ship, realized profit, and whether a trade actually happened. */
+  execCross: (ship: Ship, route: CrossSystemRoute) => Promise<{ ship: Ship; profit: number; traded: boolean }>;
   /** Run the contract pipeline once; returns the number of contracts completed. */
   execContract?: (ship: Ship) => Promise<number>;
   /** Re-fetch live ship state (the contract pipeline moves the ship internally). */
@@ -104,10 +104,13 @@ export async function runShipAgent(
   let contracts = 0;
 
   // Run one in-system arbitrage trip: claim the best unclaimed local route,
-  // execute it, release the claim. Returns the trip profit, or undefined when no
-  // free local route exists. The pick→set pair is synchronous (no await between)
-  // to keep claiming race-free across concurrent agents.
-  const tradeLocalOnce = async (): Promise<number | undefined> => {
+  // execute it, release the claim. Returns the trip profit and whether a trade
+  // actually executed, or undefined when no free local route exists. A route that
+  // was claimed but no-opped (budget cap, bought nothing) reports traded=false so
+  // the caller idles with backoff instead of busy-spinning on the same dead route.
+  // The pick→set pair is synchronous (no await between) to keep claiming race-free
+  // across concurrent agents.
+  const tradeLocalOnce = async (): Promise<{ profit: number; traded: boolean } | undefined> => {
     const route = pickLocalRoute(deps.localCandidates(), registry, {
       ship: ship.symbol,
       holdSize,
@@ -119,7 +122,7 @@ export async function runShipAgent(
     try {
       const res = await deps.execLocal(ship, route);
       ship = res.ship;
-      return res.profit;
+      return { profit: res.profit, traded: res.traded };
     } finally {
       registry.release(ship.symbol);
     }
@@ -149,8 +152,8 @@ export async function runShipAgent(
           ship = await deps.refetchShip(ship.symbol);
         } else {
           const p = await tradeLocalOnce();
-          if (p !== undefined) {
-            tripProfit = p;
+          if (p?.traded) {
+            tripProfit = p.profit;
             kind = 'local';
           }
         }
@@ -167,23 +170,25 @@ export async function runShipAgent(
           try {
             const res = await deps.execCross(ship, ranked.route);
             ship = res.ship;
-            tripProfit = res.profit;
-            kind = 'cross';
+            if (res.traded) {
+              tripProfit = res.profit;
+              kind = 'cross';
+            }
           } finally {
             registry.release(ship.symbol);
           }
         } else {
           // Gate shut or every cross lane claimed — don't idle, trade local.
           const p = await tradeLocalOnce();
-          if (p !== undefined) {
-            tripProfit = p;
+          if (p?.traded) {
+            tripProfit = p.profit;
             kind = 'local';
           }
         }
       } else {
         const p = await tradeLocalOnce();
-        if (p !== undefined) {
-          tripProfit = p;
+        if (p?.traded) {
+          tripProfit = p.profit;
           kind = 'local';
         }
       }

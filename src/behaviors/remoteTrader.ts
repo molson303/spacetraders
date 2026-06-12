@@ -33,7 +33,7 @@ export async function runRemoteTrade(
   ship: Ship,
   route: CrossSystemRoute,
   minProfit: number,
-): Promise<{ ship: Ship; profit: number }> {
+): Promise<{ ship: Ship; profit: number; traded: boolean }> {
   log.info(
     `${ship.symbol} xarb ${route.good}: buy@${route.buyAt}[${route.buySystem}](${route.buyPrice}) ` +
       `-> sell@${route.sellAt}[${route.sellSystem}](${route.sellPrice}) ~${route.profitPerUnit}/u`,
@@ -42,7 +42,7 @@ export async function runRemoteTrade(
   ship = await crossSystemTravelTo(api, ship, route.buyAt);
   if (ship.nav.waypointSymbol !== route.buyAt) {
     log.warn(`${ship.symbol} could not reach buy market ${route.buyAt}; skipping route`);
-    return { ship, profit: 0 };
+    return { ship, profit: 0, traded: false };
   }
 
   const freeCargo = ship.cargo.capacity - ship.cargo.units;
@@ -55,7 +55,7 @@ export async function runRemoteTrade(
   ship = buy.ship;
   if (buy.unitsBought === 0) {
     log.warn(`${ship.symbol} bought nothing for ${route.good}; skipping route`);
-    return { ship, profit: 0 };
+    return { ship, profit: 0, traded: false };
   }
 
   const avgCost = buy.spent / buy.unitsBought;
@@ -70,7 +70,7 @@ export async function runRemoteTrade(
     const here = await sellCargoHere(api, ship, {
       floor: (sym) => (sym === route.good ? floor : undefined),
     });
-    return { ship: here.ship, profit: here.earned - buy.spent };
+    return { ship: here.ship, profit: here.earned - buy.spent, traded: true };
   }
 
   const sell = await sellCargoHere(api, ship, {
@@ -106,5 +106,5 @@ export async function runRemoteTrade(
     log.warn(`${ship.symbol} carrying ${leftover} unsold ${route.good} (no market above floor ${floor})`);
   }
   log.info(`${ship.symbol} xarb done ${route.good}: spent=${buy.spent} earned=${earned} profit=${profit}`);
-  return { ship, profit };
+  return { ship, profit, traded: true };
 }
