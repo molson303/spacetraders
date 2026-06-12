@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   marketPriority,
+  neighborMarketPriority,
   partitionProbes,
   planProbeStations,
   probesToProvision,
@@ -113,6 +114,26 @@ test('marketPriority: busier markets outrank quieter ones; untraded outranks nei
   assert.ok(marketPriority('X1-A20-BUSY', { txCounts }) > marketPriority('X1-A20-QUIET', { txCounts }));
   // An untraded home market (tx 0 -> priority 1) still beats a neighbor (0).
   assert.ok(marketPriority('X1-A20-NONE', { txCounts }) > 0);
+});
+
+test('neighborMarketPriority: busier neighbors outrank quieter ones', () => {
+  assert.ok(neighborMarketPriority(400) > neighborMarketPriority(5));
+  assert.ok(neighborMarketPriority(5) > neighborMarketPriority(0));
+});
+
+test('neighborMarketPriority: every neighbor stays strictly below any home market', () => {
+  // The lowest possible home priority is an untraded market (tx 0 -> 1).
+  const lowestHome = marketPriority('X1-A20-NONE', { txCounts: new Map() }); // == 1
+  assert.equal(lowestHome, 1);
+  // Even a wildly busy neighbor must remain under that floor.
+  assert.ok(neighborMarketPriority(1_000_000) < lowestHome);
+  assert.ok(neighborMarketPriority(0) >= 0);
+});
+
+test('neighborMarketPriority: untraded neighbor maps to 0 (legacy flat behavior)', () => {
+  assert.equal(neighborMarketPriority(0), 0);
+  // Negative counts clamp to 0 rather than going negative.
+  assert.equal(neighborMarketPriority(-5), 0);
 });
 
 test('planProbeStations: rebalances a probe off a low-priority market onto a higher one', () => {

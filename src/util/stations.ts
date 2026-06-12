@@ -64,6 +64,20 @@ export function marketPriority(symbol: string, inputs: MarketPriorityInputs = {}
 }
 
 /**
+ * Stationing priority for a cross-system neighbor market, ranked by the
+ * neighbor's own recent transaction count so busier neighbor markets earn a
+ * probe first. The count is mapped through `n / (n + 1)` into the half-open
+ * range [0, 1): monotonic in volume but always strictly below 1, so every
+ * neighbor stays under even an untraded home market (priority >= 1). An
+ * untraded neighbor maps to 0, matching the legacy flat-priority behavior.
+ * Negative counts are clamped to 0. Higher = more important.
+ */
+export function neighborMarketPriority(txCount: number): number {
+  const n = Math.max(0, txCount);
+  return n / (n + 1);
+}
+
+/**
  * Assign probes to markets, preserving any still-valid existing assignments and
  * filling uncovered markets (priority-first) with free probes. An existing
  * assignment is retained only when its probe still exists and its market is

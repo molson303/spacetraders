@@ -29,6 +29,7 @@ import { bestReinvestShip, earnWeight, reinvestEarnerHeadroom } from '../util/re
 import { countDistinctRoutes } from '../util/routes.js';
 import {
   marketPriority,
+  neighborMarketPriority,
   planProbeStations,
   probesToProvision,
   type StationAssignment,
@@ -94,11 +95,23 @@ function coordsOf(symbol: string): { x: number; y: number } | undefined {
  * plus the home jump gate while it is under construction — floated to the top so
  * they are always covered. When the home gate is operational, hydrated markets
  * in directly-connected neighbor systems are appended at priority 0; while the
- * gate is under construction only home markets are returned.
+ * gate is under construction only home markets are returned. Neighbor markets
+ * are ranked among themselves by their own recent trade volume (via
+ * `inputs.neighborTxCounts`) while staying strictly below every home market;
+ * without a resolver they fall back to a flat priority 0.
  */
 export function gatherStationMarkets(
   system: string,
-  inputs: { txCounts?: Map<string, number>; strategic?: Set<string> } = {},
+  inputs: {
+    txCounts?: Map<string, number>;
+    strategic?: Set<string>;
+    /**
+     * Resolver for a neighbor system's per-waypoint recent tx counts, used to
+     * rank cross-system neighbor markets among themselves (busier first). When
+     * omitted, neighbor markets fall back to priority 0.
+     */
+    neighborTxCounts?: (system: string) => Map<string, number>;
+  } = {},
 ): StationMarket[] {
   const strategic = new Set(inputs.strategic ?? []);
   const homeGate = findJumpGatesBySystem(system)[0];
@@ -122,8 +135,13 @@ export function gatherStationMarkets(
   );
   const neighbors: StationMarket[] = [];
   for (const sys of neighborSystems) {
+    const counts = inputs.neighborTxCounts?.(sys);
     for (const w of findWaypointsByTrait(sys, 'MARKETPLACE')) {
-      neighbors.push({ symbol: w.symbol, system: w.system, priority: 0 });
+      neighbors.push({
+        symbol: w.symbol,
+        system: w.system,
+        priority: neighborMarketPriority(counts?.get(w.symbol) ?? 0),
+      });
     }
   }
   return [...home, ...neighbors];
@@ -236,7 +254,11 @@ export async function maybeProvisionProbes(
   // waypoints (and the under-construction home gate) to the top.
   const txCounts = countTransactionsByWaypoint(system, cfg.stationTxWindowDays ?? 7);
   const strategic = new Set(cfg.strategicMarkets ?? []);
-  const markets: StationMarket[] = gatherStationMarkets(system, { txCounts, strategic });
+  const markets: StationMarket[] = gatherStationMarkets(system, {
+    txCounts,
+    strategic,
+    neighborTxCounts: (sys) => countTransactionsByWaypoint(sys, cfg.stationTxWindowDays ?? 7),
+  });
   if (markets.length === 0) return 0;
 
   const existing = kvGet<StationAssignment[]>('probe_stations') ?? [];
