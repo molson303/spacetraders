@@ -4,7 +4,7 @@ import { log } from '../util/logger.js';
 const api = new SpaceTradersApi();
 const agent = await api.getMyAgent();
 log.info(`credits=${agent.credits}`);
-const ships = (await api.listShips()).data;
+const ships = await api.listAllShips();
 for (const s of ships) {
   const cond = [s.frame.condition, s.reactor.condition, s.engine.condition].filter(
     (c): c is number => typeof c === 'number',

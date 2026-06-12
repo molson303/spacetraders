@@ -163,7 +163,7 @@ export function gatherStationMarkets(
 export async function maybeReinvest(api: SpaceTradersApi, cfg: MaintenanceConfig): Promise<number> {
   if (!cfg.reinvest) return 0;
   let agent = await api.getMyAgent();
-  const fleet = (await api.listShips()).data;
+  const fleet = await api.listAllShips();
   // Only cargo earners count against MAX_SHIPS; stationed/scout probes live on
   // their own MAX_PROBES budget and must never crowd out income ships here.
   const earnerCount = fleet.filter((s) => s.cargo.capacity > 0 && s.fuel.capacity > 0).length;
@@ -253,7 +253,7 @@ export async function maybeProvisionProbes(
   cfg: MaintenanceConfig,
 ): Promise<number> {
   let agent = await api.getMyAgent();
-  let fleet = (await api.listShips()).data;
+  let fleet = await api.listAllShips();
   const system = systemOf(agent.headquarters);
 
   const isProbe = (s: { fuel: { capacity: number } }): boolean => s.fuel.capacity === 0;
@@ -334,7 +334,7 @@ export async function maybeProvisionProbes(
   // Re-plan over ALL current probes (including any just bought) and persist, so
   // station-keeping relocates probes to the highest-priority markets even when
   // we're not buying.
-  if (bought > 0) fleet = (await api.listShips()).data;
+  if (bought > 0) fleet = await api.listAllShips();
   const allProbes = fleet.filter(isProbe).map((p) => ({ symbol: p.symbol }));
   if (allProbes.length === 0) return bought;
   const plan = planProbeStations(markets, allProbes, existing);
@@ -357,7 +357,7 @@ export async function maybeRepairFleet(
 ): Promise<number> {
   if (!cfg.repair) return 0;
   let repaired = 0;
-  const fleet = (await api.listShips()).data;
+  const fleet = await api.listAllShips();
   for (const ship of fleet) {
     if (cfg.stopping()) break;
     const agent = await api.getMyAgent();

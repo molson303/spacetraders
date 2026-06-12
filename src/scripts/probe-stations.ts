@@ -30,7 +30,7 @@ async function main(): Promise<void> {
   const txCounts = countTransactionsByWaypoint(system, windowDays);
   const markets = gatherStationMarkets(system, { txCounts, strategic });
 
-  const fleet = (await api.listShips()).data;
+  const fleet = await api.listAllShips();
   const probes = fleet.filter((s) => s.fuel.capacity === 0);
   const posOf = new Map(probes.map((p) => [p.symbol, p.nav.waypointSymbol]));
 

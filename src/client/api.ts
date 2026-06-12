@@ -20,6 +20,7 @@ import type {
 } from '../types/index.js';
 import { HttpClient } from './http.js';
 import { RateLimiter } from './rateLimiter.js';
+import { collectAllPages } from '../util/paginate.js';
 
 /* Thin typed wrapper over the SpaceTraders REST endpoints. */
 
@@ -167,6 +168,16 @@ export class SpaceTradersApi {
       page: query.page ?? 1,
       limit: query.limit ?? 20,
     });
+  }
+
+  /**
+   * The complete fleet, paging past the 20-ships-per-page server cap. Callers
+   * that reason about the whole roster (fleet partitioning, probe/flex split,
+   * earner counts, repair sweeps) MUST use this — a single listShips() page
+   * silently hides ships beyond the first 20.
+   */
+  async listAllShips(): Promise<Ship[]> {
+    return collectAllPages((page) => this.listShips({ page, limit: 20 }));
   }
 
   async getShip(symbol: string): Promise<Ship> {

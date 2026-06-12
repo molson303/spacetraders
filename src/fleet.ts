@@ -263,7 +263,7 @@ async function main(): Promise<void> {
   // already running. Called at startup and after reinvest buys new earners, so
   // newly purchased ships join the continuous fleet without a restart.
   const syncAgents = async (): Promise<void> => {
-    const ships = (await api.listShips()).data;
+    const ships = await api.listAllShips();
     const part = partitionFleet(ships, {
       crossShips: CFG.crossShips,
       enableContractor: CFG.contractor,
@@ -286,7 +286,7 @@ async function main(): Promise<void> {
   // systems to seed the cross-gate source. Runs as one perpetual agent on its
   // own interval, parallel to the trade agents.
   const probeDeps: ProbeCycleDeps = {
-    listScouts: async () => (await api.listShips()).data.filter((s) => s.fuel.capacity === 0),
+    listScouts: async () => (await api.listAllShips()).filter((s) => s.fuel.capacity === 0),
     getStations: () => kvGet<StationAssignment[]>('probe_stations') ?? [],
     stationKeep: (probes, stationed, allowCross) =>
       runStationKeeping(api, probes, stationed, { allowCrossSystem: allowCross }),
