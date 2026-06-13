@@ -1,9 +1,11 @@
 /*
  * Hydrate every neighbor system one jump from the home gate into the local DB:
- * waypoint rows (so their marketplaces become station-candidate-eligible) plus
- * public market structures (imports/exports — no ship presence required, so the
- * trade graph lights up for route-finding before any probe arrives). Live prices
- * are still captured later when a stationed probe is relocated there and scans.
+ * waypoint rows (so their marketplaces become station-candidate-eligible), public
+ * market structures (imports/exports — no ship presence required, so the trade
+ * graph lights up for route-finding before any probe arrives), and each neighbor's
+ * jump gate (so ships routed into a neighbor can leave again instead of stranding
+ * with "no known jump gate"). Live prices are still captured later when a stationed
+ * probe is relocated there and scans.
  *
  * This is the fast unlock for cross-system coverage: `gatherStationMarkets` only
  * sees a neighbor's markets once its waypoints are in the DB, and `runRemoteScout`
@@ -49,8 +51,12 @@ async function main(): Promise<void> {
 
   for (const sys of neighbors) {
     try {
-      await hydrateSystemWaypoints(api, sys, true);
-      await hydrateMarketStructures(api, sys, true);
+      await hydrateSystemWaypoints(api, sys, false);
+      await hydrateMarketStructures(api, sys, false);
+      // Force jump-gate hydration: neighbor gates unlock cross-system travel for
+      // ships routed into these systems (otherwise they strand with "no known
+      // jump gate"). force=true re-scans even if a stale cache flag is set.
+      await hydrateJumpGates(api, sys, true);
       const markets = findWaypointsByTrait(sys, 'MARKETPLACE');
       log.info(`${sys}: ${markets.length} marketplace(s) hydrated`);
     } catch (err) {
